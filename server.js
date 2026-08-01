@@ -3,34 +3,52 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const sqlite3 = require('sqlite3').verbose();
+const path = require('path');
+
+// Excel parsing library dependency fallback check (Included via client script for browser parsing, or backend processing)
+let xlsx;
+try {
+    xlsx = require('xlsx');
+} catch (e) {
+    console.log("Note: Install 'xlsx' package (`npm install xlsx`) for backend binary excel processing.");
+}
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const SECRET_KEY = process.env.JWT_SECRET || "pharma_sync_pro_ultra_secret_2026";
+const SECRET_KEY = process.env.JWT_SECRET || "pharma_sync_ultra_secure_debanjan_2026_key";
+
+// Legal Copyright Notice Verification
+const COPYRIGHT_OWNER = "Debanjan Singha";
+console.log(`================================================================`);
+console.log(` PHARMA-SYNC PRO | ALL RIGHTS RESERVED`);
+console.log(` Proprietary Software Architecture Created by ${COPYRIGHT_OWNER}`);
+console.log(` Unauthorized distribution, cloning, or usage is strictly prohibited.`);
+console.log(`================================================================`);
 
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
 
 // Database Initialization
 const db = new sqlite3.Database('./pharmacy.db', (err) => {
     if (!err) {
-        console.log("Connected to Pharma-Sync Multi-Zone Database.");
+        console.log("Database initialized successfully.");
         initDb();
     }
 });
 
 function initDb() {
-    // 1. Users
+    // 1. Users table (Stores phone number & multi-zone JSON array)
     db.run(`CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE,
+        phone TEXT,
         password TEXT,
-        role TEXT,        -- 'ADMIN' or 'OPERATOR'
-        zone TEXT,        -- e.g., 'ZONE-NORTH', 'MAIN-STORE'
+        role TEXT,           -- 'ADMIN' or 'OPERATOR'
+        zones TEXT,          -- Stored as JSON string array e.g. ["NORTH", "SOUTH"]
         status INTEGER DEFAULT 1
     )`);
 
-    // 2. Zone-Specific Master Drugs Directory
+    // 2. Master Drugs Directory
     db.run(`CREATE TABLE IF NOT EXISTS master_drugs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         zone TEXT,
@@ -48,38 +66,47 @@ function initDb() {
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
-    // 4. User Audit Logs (Login / Logout Tracking)
+    // 4. Audit Logs
     db.run(`CREATE TABLE IF NOT EXISTS audit_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT,
+        phone TEXT,
         zone TEXT,
-        action TEXT, -- 'LOGIN' or 'LOGOUT'
+        action TEXT, -- 'LOGIN', 'LOGOUT', etc.
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
     // Default Master Admin Setup
-    db.get("SELECT * FROM users WHERE username = 'admin'", async (err, row) => {
+    db.get("SELECT * FROM users WHERE role = 'ADMIN'", async (err, row) => {
         if (!row) {
             const hash = await bcrypt.hash('admin123', 10);
-            db.run("INSERT INTO users (username, password, role, zone, status) VALUES ('admin', ?, 'ADMIN', 'ALL', 1)", [hash]);
+            db.run(
+                "INSERT INTO users (username, phone, password, role, zones, status) VALUES ('admin', '0000000000', ?, 'ADMIN', '[\"ALL\"]', 1)",
+                [hash]
+            );
             console.log("Master Admin initialized: admin / admin123");
         }
     });
 }
 
-// Security Middleware
+// Security Middleware (Strict 8-hour Token Expiry Enforcement)
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
-    if (!token) return res.status(401).json({ error: "Access Denied" });
+    if (!token) return res.status(401).json({ error: "Access Denied. Please Log In." });
 
     jwt.verify(token, SECRET_KEY, (err, decoded) => {
-        if (err) return res.status(403).json({ error: "Invalid Session" });
+        if (err) return res.status(403).json({ error: "Session expired or invalid. Please login again." });
 
         db.get("SELECT * FROM users WHERE id = ?", [decoded.id], (err, user) => {
-            if (err || !user) return res.status(404).json({ error: "User not found" });
+            if (err || !user) return res.status(404).json({ error: "User profile not found." });
+            
+            // Explicit Blocked User Guardrail
             if (user.status !== 1) {
-                return res.status(403).json({ error: "ACCOUNT_DISABLED", message: "Access turned OFF by Admin." });
+                return res.status(403).json({ 
+                    error: "ACCESS_DISABLED", 
+                    message: "ERROR! PLEASE CONTACT TO THE ADMIN" 
+                });
             }
             req.user = user;
             next();
@@ -87,106 +114,203 @@ const authenticateToken = (req, res, next) => {
     });
 };
 
-// --- AUTHENTICATION ROUTES ---
+// --- AUTHENTICATION & ADMIN PROFILE ROUTES ---
 
 app.post('/api/login', (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error: "Username and password required" });
 
-    db.get("SELECT * FROM users WHERE username = ?", [username], async (err, user) => {
-        if (err || !user) return res.status(400).json({ error: "User not found" });
-        if (user.status !== 1) return res.status(403).json({ error: "Account is turned OFF by Admin." });
+    db.get("SELECT * FROM users WHERE username = ? OR phone = ?", [username, username], async (err, user) => {
+        if (err || !user) return res.status(400).json({ error: "Invalid credentials" });
+        
+        if (user.status !== 1) {
+            return res.status(403).json({ error: "ERROR! PLEASE CONTACT TO THE ADMIN" });
+        }
 
         const validPass = await bcrypt.compare(password, user.password);
-        if (!validPass) return res.status(400).json({ error: "Invalid Password" });
+        if (!validPass) return res.status(400).json({ error: "Invalid credentials" });
 
-        db.run("INSERT INTO audit_logs (username, zone, action) VALUES (?, ?, 'LOGIN')", [user.username, user.zone]);
+        // Log audit
+        db.run("INSERT INTO audit_logs (username, phone, zone, action) VALUES (?, ?, ?, 'LOGIN')", 
+            [user.username, user.phone, user.zones]);
 
-        const token = jwt.sign({ id: user.id, username: user.username, role: user.role, zone: user.zone }, SECRET_KEY, { expiresIn: '24h' });
-        res.json({ token, role: user.role, username: user.username, zone: user.zone });
+        // Token generated with strict 8 Hours lifespan
+        const token = jwt.sign(
+            { id: user.id, username: user.username, role: user.role }, 
+            SECRET_KEY, 
+            { expiresIn: '8h' }
+        );
+
+        let userZones = [];
+        try { userZones = JSON.parse(user.zones); } catch(e) { userZones = [user.zones]; }
+
+        res.json({ 
+            token, 
+            role: user.role, 
+            username: user.username, 
+            phone: user.phone,
+            zones: userZones 
+        });
     });
 });
 
 app.post('/api/logout', authenticateToken, (req, res) => {
-    db.run("INSERT INTO audit_logs (username, zone, action) VALUES (?, ?, 'LOGOUT')", [req.user.username, req.user.zone]);
+    const activeZone = req.body.zone || "N/A";
+    db.run("INSERT INTO audit_logs (username, phone, zone, action) VALUES (?, ?, ?, 'LOGOUT')", 
+        [req.user.username, req.user.phone, activeZone]);
     res.json({ message: "Logged out successfully" });
 });
 
-// --- MASTER DRUG DIRECTORY ROUTES (ZONE SPECIFIC) ---
+// Admin can change their own username and password
+app.put('/api/admin/profile', authenticateToken, async (req, res) => {
+    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required" });
+    const { newUsername, newPassword } = req.body;
 
-app.get('/api/master-drugs', authenticateToken, (req, res) => {
-    const targetZone = (req.user.role === 'ADMIN' && req.query.zone) ? req.query.zone : req.user.zone;
-    
-    let query = "SELECT drug_name FROM master_drugs WHERE zone = ? ORDER BY drug_name ASC";
-    let params = [targetZone];
-
-    if (req.user.role === 'ADMIN' && targetZone === 'ALL') {
-        query = "SELECT DISTINCT drug_name FROM master_drugs ORDER BY drug_name ASC";
-        params = [];
+    if (!newUsername || !newPassword) {
+        return res.status(400).json({ error: "New username and password required" });
     }
 
-    db.all(query, params, (err, rows) => {
+    try {
+        const hash = await bcrypt.hash(newPassword, 10);
+        db.run("UPDATE users SET username = ?, password = ? WHERE id = ?", [newUsername.trim(), hash, req.user.id], function(err) {
+            if (err) return res.status(500).json({ error: "Username already taken or database error" });
+            res.json({ message: "Admin credentials updated successfully! Please re-login." });
+        });
+    } catch(e) {
+        res.status(500).json({ error: "Password encryption error" });
+    }
+});
+
+// --- ADMIN USER MANAGEMENT & AUDIT CONTROL ---
+
+app.get('/api/users', authenticateToken, (req, res) => {
+    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required" });
+    
+    db.all("SELECT id, username, phone, role, zones, status FROM users WHERE role != 'ADMIN'", [], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        const parsedRows = rows.map(r => {
+            let z = [];
+            try { z = JSON.parse(r.zones); } catch(e) { z = [r.zones]; }
+            return { ...r, zones: z };
+        });
+        res.json(parsedRows);
+    });
+});
+
+app.post('/api/users', authenticateToken, async (req, res) => {
+    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required" });
+    
+    const { username, phone, password, zones } = req.body;
+    if (!username || !phone || !password || !zones || !Array.isArray(zones) || zones.length === 0) {
+        return res.status(400).json({ error: "Username, phone, password, and at least 1 zone required." });
+    }
+
+    try {
+        const hash = await bcrypt.hash(password, 10);
+        const zonesJson = JSON.stringify(zones.map(z => z.trim().toUpperCase()));
+
+        db.run("INSERT INTO users (username, phone, password, role, zones, status) VALUES (?, ?, ?, 'OPERATOR', ?, 1)", 
+            [username.trim(), phone.trim(), hash, zonesJson], 
+            function(err) {
+                if (err) {
+                    if (err.message.includes('UNIQUE')) return res.status(400).json({ error: "Username already exists." });
+                    return res.status(500).json({ error: err.message });
+                }
+                res.json({ message: "User assigned successfully!" });
+            }
+        );
+    } catch (e) {
+        res.status(500).json({ error: "Encryption error" });
+    }
+});
+
+app.put('/api/users/:id/status', authenticateToken, (req, res) => {
+    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required" });
+    db.run("UPDATE users SET status = ? WHERE id = ?", [req.body.status, req.params.id], function(err) {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ message: "User status updated" });
+    });
+});
+
+app.get('/api/admin/audit-logs', authenticateToken, (req, res) => {
+    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required" });
+    db.all("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 200", [], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows);
+    });
+});
+
+// --- MASTER DRUG DIRECTORY ROUTES ---
+
+app.get('/api/master-drugs', authenticateToken, (req, res) => {
+    const targetZone = req.query.zone;
+    if (!targetZone) return res.status(400).json({ error: "Zone parameter required" });
+
+    db.all("SELECT drug_name FROM master_drugs WHERE zone = ? ORDER BY drug_name ASC", [targetZone], (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
         res.json(rows.map(r => r.drug_name));
     });
 });
 
 app.post('/api/master-drugs', authenticateToken, (req, res) => {
-    if (!req.body.drug_name) return res.status(400).json({ error: "Drug name required" });
-    const name = req.body.drug_name.trim().toUpperCase();
-    const targetZone = (req.user.role === 'ADMIN' && req.body.zone) ? req.body.zone : req.user.zone;
+    const { drug_name, zone } = req.body;
+    if (!drug_name || !zone) return res.status(400).json({ error: "Drug name and zone required" });
+    
+    const name = drug_name.trim().toUpperCase();
 
-    db.run("INSERT OR IGNORE INTO master_drugs (zone, drug_name) VALUES (?, ?)", [targetZone, name], function(err) {
+    db.run("INSERT OR IGNORE INTO master_drugs (zone, drug_name) VALUES (?, ?)", [zone, name], function(err) {
         if (err) return res.status(500).json({ error: err.message });
         res.json({ message: "Drug registered successfully" });
     });
 });
 
-app.delete('/api/master-drugs/:name', authenticateToken, (req, res) => {
-    const targetZone = (req.user.role === 'ADMIN' && req.query.zone) ? req.query.zone : req.user.zone;
-    db.run("DELETE FROM master_drugs WHERE drug_name = ? AND zone = ?", [req.params.name, targetZone], function(err) {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json({ message: "Drug deleted from zone directory" });
+// Edit drug name in Master Directory (Cascades to history and daily totals)
+app.put('/api/master-drugs/rename', authenticateToken, (req, res) => {
+    const { oldName, newName, zone } = req.body;
+    if (!oldName || !newName || !zone) return res.status(400).json({ error: "Old name, new name, and zone required" });
+
+    const formattedOld = oldName.trim().toUpperCase();
+    const formattedNew = newName.trim().toUpperCase();
+
+    db.serialize(() => {
+        db.run("UPDATE master_drugs SET drug_name = ? WHERE drug_name = ? AND zone = ?", [formattedNew, formattedOld, zone]);
+        db.run("UPDATE dispenses SET drug_name = ? WHERE drug_name = ? AND zone = ?", [formattedNew, formattedOld, zone], function(err) {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json({ message: `Successfully updated ${formattedOld} to ${formattedNew} across all system logs.` });
+        });
     });
 });
 
-// ADMIN BULK IMPORT FOR MASTER DIRECTORY
+// Master Directory Import Routine (Supports Merge or Reset)
 app.post('/api/master-drugs/import', authenticateToken, (req, res) => {
-    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required for import" });
-
     const { mode, drugs, zone } = req.body; // mode: 'reset' or 'merge'
-    const targetZone = zone || 'MAIN-STORE';
-
-    if (!Array.isArray(drugs) || drugs.length === 0) {
-        return res.status(400).json({ error: "No drug list provided" });
-    }
+    if (!zone || !Array.isArray(drugs)) return res.status(400).json({ error: "Invalid data format or missing zone" });
 
     db.serialize(() => {
         if (mode === 'reset') {
-            db.run("DELETE FROM master_drugs WHERE zone = ?", [targetZone]);
+            db.run("DELETE FROM master_drugs WHERE zone = ?", [zone]);
         }
 
         const stmt = db.prepare("INSERT OR IGNORE INTO master_drugs (zone, drug_name) VALUES (?, ?)");
         drugs.forEach(d => {
             if (typeof d === 'string' && d.trim().length > 0) {
-                stmt.run(targetZone, d.trim().toUpperCase());
+                stmt.run(zone, d.trim().toUpperCase());
             }
         });
         stmt.finalize((err) => {
             if (err) return res.status(500).json({ error: "Import failed" });
-            res.json({ message: `Successfully ${mode === 'reset' ? 'reset and imported' : 'merged'} ${drugs.length} drugs into ${targetZone}.` });
+            res.json({ message: `Master directory successfully ${mode === 'reset' ? 'reset and loaded' : 'merged'} with ${drugs.length} items.` });
         });
     });
 });
 
-// --- DISPENSE & AUTO-SYNC ROUTES ---
+// --- DISPENSE & TODAY'S TOTAL LOGS ---
 
 app.post('/api/dispense', authenticateToken, (req, res) => {
-    const { drug_name, qty } = req.body;
-    if (!drug_name || !qty) return res.status(400).json({ error: "Drug and quantity required" });
+    const { drug_name, qty, zone } = req.body;
+    if (!drug_name || !qty || !zone) return res.status(400).json({ error: "Drug, quantity, and zone required" });
 
     const drugName = drug_name.trim().toUpperCase();
-    const zone = req.user.role === 'ADMIN' ? (req.body.zone || 'MAIN-STORE') : req.user.zone;
 
     db.run("INSERT INTO dispenses (zone, drug_name, qty, entered_by) VALUES (?, ?, ?, ?)", 
         [zone, drugName, parseInt(qty), req.user.username], 
@@ -198,47 +322,23 @@ app.post('/api/dispense', authenticateToken, (req, res) => {
 });
 
 app.get('/api/dispense/sync', authenticateToken, (req, res) => {
-    let query = "SELECT * FROM dispenses WHERE zone = ? ORDER BY id DESC LIMIT 150";
-    let params = [req.user.zone];
+    const targetZone = req.query.zone;
+    if (!targetZone) return res.status(400).json({ error: "Zone required" });
 
-    if (req.user.role === 'ADMIN') {
-        const filterZone = req.query.zone;
-        if (filterZone && filterZone !== 'ALL') {
-            query = "SELECT * FROM dispenses WHERE zone = ? ORDER BY id DESC LIMIT 150";
-            params = [filterZone];
-        } else {
-            query = "SELECT * FROM dispenses ORDER BY id DESC LIMIT 250";
-            params = [];
-        }
-    }
-
-    db.all(query, params, (err, rows) => {
+    db.all("SELECT * FROM dispenses WHERE zone = ? ORDER BY id DESC LIMIT 500", [targetZone], (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
         res.json(rows);
     });
 });
 
-// UNDO LAST DISPENSE ENTRY (ZONE SPECIFIC)
-app.post('/api/dispense/undo', authenticateToken, (req, res) => {
-    const targetZone = req.user.role === 'ADMIN' ? (req.body.zone || req.user.zone) : req.user.zone;
-    
-    db.get("SELECT id FROM dispenses WHERE zone = ? ORDER BY id DESC LIMIT 1", [targetZone], (err, row) => {
-        if (err || !row) return res.status(404).json({ error: "No recent entries found to undo." });
+// Edit or Undo recent dispense amount
+app.put('/api/dispense/:id', authenticateToken, (req, res) => {
+    const { qty } = req.body;
+    if (isNaN(qty)) return res.status(400).json({ error: "Valid quantity required" });
 
-        db.run("DELETE FROM dispenses WHERE id = ?", [row.id], function(err) {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json({ message: "Last entry undone successfully." });
-        });
-    });
-});
-
-// RESET TOTALS & HISTORY (ZONE SPECIFIC)
-app.post('/api/dispense/reset-zone', authenticateToken, (req, res) => {
-    const targetZone = req.user.role === 'ADMIN' ? (req.body.zone || req.user.zone) : req.user.zone;
-
-    db.run("DELETE FROM dispenses WHERE zone = ?", [targetZone], function(err) {
+    db.run("UPDATE dispenses SET qty = ? WHERE id = ?", [parseInt(qty), req.params.id], function(err) {
         if (err) return res.status(500).json({ error: err.message });
-        res.json({ message: `All totals and history reset for zone: ${targetZone}` });
+        res.json({ message: "Dispense amount updated successfully" });
     });
 });
 
@@ -249,69 +349,30 @@ app.delete('/api/dispense/:id', authenticateToken, (req, res) => {
     });
 });
 
-// --- ADMIN AUDIT & USER CONTROL ROUTES ---
+// Today's Total / Dispense History Import Routine
+app.post('/api/dispense/import', authenticateToken, (req, res) => {
+    const { mode, records, zone } = req.body; // mode: 'reset' or 'merge', records: [{drug_name, qty}]
+    if (!zone || !Array.isArray(records)) return res.status(400).json({ error: "Invalid data format or missing zone" });
 
-app.get('/api/users', authenticateToken, (req, res) => {
-    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required" });
-    
-    const sql = `
-        SELECT u.id, u.username, u.role, u.zone, u.status, 
-               COUNT(d.id) as total_entries, 
-               COALESCE(SUM(d.qty), 0) as total_qty
-        FROM users u 
-        LEFT JOIN dispenses d ON u.username = d.entered_by 
-        GROUP BY u.id
-    `;
-    db.all(sql, [], (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json(rows);
-    });
-});
+    db.serialize(() => {
+        if (mode === 'reset') {
+            db.run("DELETE FROM dispenses WHERE zone = ?", [zone]);
+        }
 
-app.post('/api/users', authenticateToken, async (req, res) => {
-    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required" });
-    
-    const { username, password, role, zone } = req.body;
-    if (!username || !password || !zone) {
-        return res.status(400).json({ error: "Username, password, and zone are required" });
-    }
-
-    try {
-        const hash = await bcrypt.hash(password, 10);
-        const formattedZone = zone.trim().toUpperCase();
-
-        db.run("INSERT INTO users (username, password, role, zone, status) VALUES (?, ?, ?, ?, 1)", 
-            [username.trim(), hash, role || 'OPERATOR', formattedZone], 
-            function(err) {
-                if (err) {
-                    if (err.message.includes('UNIQUE')) return res.status(400).json({ error: "Username already exists." });
-                    return res.status(500).json({ error: err.message });
-                }
-                res.json({ message: "User created successfully!" });
+        const stmt = db.prepare("INSERT INTO dispenses (zone, drug_name, qty, entered_by) VALUES (?, ?, ?, ?)");
+        records.forEach(r => {
+            if (r.drug_name && !isNaN(r.qty)) {
+                stmt.run(zone, r.drug_name.trim().toUpperCase(), parseInt(r.qty), req.user.username);
             }
-        );
-    } catch (e) {
-        res.status(500).json({ error: "Password encryption error" });
-    }
-});
-
-app.put('/api/users/:id/status', authenticateToken, (req, res) => {
-    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required" });
-    db.run("UPDATE users SET status = ? WHERE id = ?", [req.body.status, req.params.id], function(err) {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json({ message: "Status updated" });
+        });
+        stmt.finalize((err) => {
+            if (err) return res.status(500).json({ error: "Import failed" });
+            res.json({ message: `Today's Totals successfully ${mode === 'reset' ? 'reset and imported' : 'merged'} with ${records.length} entries.` });
+        });
     });
 });
 
-app.get('/api/admin/audit-logs', authenticateToken, (req, res) => {
-    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required" });
-    db.all("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 50", [], (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json(rows);
-    });
-});
-
-// --- FRONTEND APP INTERFACE (BRIGHT VIBRANT LIGHT THEME) ---
+// --- SINGLE PAGE FRONTEND CONSOLE ---
 
 app.get('/', (req, res) => {
     res.send(`
@@ -320,96 +381,94 @@ app.get('/', (req, res) => {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PHARMA-SYNC PRO | VIBRANT CLINICAL CONSOLE</title>
-    <meta name="author" content="Debanjan Singha">
+    <title>PHARMA-SYNC PRO | CLINICAL ENTERPRISE DIRECTORY</title>
+    
+    <!-- Dependencies for PDF and Excel Processing -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.23/jspdf.plugin.autotable.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    
     <style>
         :root {
             --bg: #f0f4f9;
             --card-bg: #ffffff;
-            --card-inner: #f8fafc;
             --primary: #0284c7;
             --primary-hover: #0369a1;
             --secondary: #6366f1;
-            --accent: #06b6d4;
             --success: #10b981;
-            --success-hover: #059669;
             --danger: #ef4444;
-            --danger-hover: #dc2626;
             --warning: #f59e0b;
             --text-main: #0f172a;
             --text-muted: #64748b;
-            --border: #cbd5e1;
-            --shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.01);
+            --shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05);
         }
 
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: var(--bg); color: var(--text-main); margin: 0; padding: 20px; }
         .container { max-width: 1550px; margin: auto; }
 
-        .app-grid { display: grid; grid-template-columns: 360px 1fr 400px; gap: 20px; align-items: start; }
-        @media (max-width: 1300px) { .app-grid { grid-template-columns: 1fr 1fr; } }
-        @media (max-width: 850px) { .app-grid { grid-template-columns: 1fr; } }
-
         .header-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; background: linear-gradient(135deg, #ffffff 0%, #e0f2fe 100%); padding: 18px 28px; border-radius: 16px; border: 2px solid #bae6fd; box-shadow: var(--shadow); }
         .panel { background: var(--card-bg); padding: 22px; border-radius: 16px; border: 1px solid #e2e8f0; margin-bottom: 20px; box-shadow: var(--shadow); }
-        .panel h2 { font-size: 15px; font-weight: 800; margin-top: 0; margin-bottom: 16px; color: var(--primary); border-bottom: 2px solid #f1f5f9; padding-bottom: 10px; text-transform: uppercase; letter-spacing: 0.6px; display: flex; justify-content: space-between; align-items: center; }
+        .panel h2 { font-size: 15px; font-weight: 800; margin-top: 0; margin-bottom: 16px; color: var(--primary); border-bottom: 2px solid #f1f5f9; padding-bottom: 10px; text-transform: uppercase; display: flex; justify-content: space-between; align-items: center; }
 
-        input, select, textarea { width: 100%; padding: 11px 14px; border: 2px solid #e2e8f0; border-radius: 10px; font-size: 13px; font-weight: 600; box-sizing: border-box; margin-bottom: 10px; background: var(--card-inner); color: var(--text-main); transition: 0.2s; }
-        input:focus, select:focus { outline: none; border-color: var(--primary); background: #ffffff; box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.15); }
-        
-        .primary-btn { background: var(--primary); color: white; padding: 11px; border: none; border-radius: 10px; cursor: pointer; font-weight: 700; width: 100%; transition: 0.2s; font-size: 13px; letter-spacing: 0.3px; box-shadow: 0 4px 12px rgba(2, 132, 199, 0.25); }
-        .primary-btn:hover { background: var(--primary-hover); transform: translateY(-1px); }
+        input, select, textarea { width: 100%; padding: 10px 12px; border: 2px solid #e2e8f0; border-radius: 10px; font-size: 13px; font-weight: 600; box-sizing: border-box; margin-bottom: 10px; background: #f8fafc; transition: 0.2s; }
+        input:focus, select:focus { outline: none; border-color: var(--primary); background: #ffffff; }
 
-        .qty-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
-        .qty-pill { background: #f1f5f9; border: 2px solid #cbd5e1; color: var(--text-main); padding: 10px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 800; transition: 0.15s; }
-        .qty-pill:hover { background: var(--primary); color: white; border-color: var(--primary); }
+        .primary-btn { background: var(--primary); color: white; padding: 10px 14px; border: none; border-radius: 10px; cursor: pointer; font-weight: 700; width: 100%; transition: 0.2s; font-size: 13px; }
+        .primary-btn:hover { background: var(--primary-hover); }
 
-        .table-wrap { max-height: 380px; overflow-y: auto; border: 2px solid #e2e8f0; border-radius: 10px; background: #ffffff; }
+        .app-grid { display: grid; grid-template-columns: 380px 1fr 400px; gap: 20px; }
+        @media (max-width: 1250px) { .app-grid { grid-template-columns: 1fr; } }
+
+        .table-wrap { max-height: 300px; overflow-y: auto; border: 2px solid #e2e8f0; border-radius: 10px; background: #ffffff; }
         table { width: 100%; border-collapse: collapse; font-size: 13px; }
-        th { background: #f8fafc; padding: 12px; text-align: left; color: var(--text-muted); font-weight: 700; position: sticky; top: 0; z-index: 10; border-bottom: 2px solid #e2e8f0; text-transform: uppercase; font-size: 11px; }
-        td { padding: 10px 12px; border-bottom: 1px solid #f1f5f9; font-weight: 500; }
+        th { background: #f8fafc; padding: 10px; text-align: left; color: var(--text-muted); font-weight: 700; position: sticky; top: 0; border-bottom: 2px solid #e2e8f0; }
+        td { padding: 8px 10px; border-bottom: 1px solid #f1f5f9; }
 
         .badge { background: #e0f2fe; color: #0284c7; padding: 4px 8px; border-radius: 6px; font-weight: 800; font-size: 11px; }
-        .badge-on { background: #dcfce7; color: #15803d; }
-        .badge-off { background: #ffe4e6; color: #be123c; }
-        .action-btn { cursor: pointer; font-size: 11px; font-weight: 700; border: none; padding: 5px 10px; border-radius: 6px; transition: 0.2s; }
-        
-        #loginOverlay { position: fixed; inset: 0; background: linear-gradient(135deg, #0284c7 0%, #4f46e5 100%); display: grid; place-items: center; z-index: 2000; }
-        .login-box { width: 340px; background: #ffffff; padding: 35px; border-radius: 20px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); border: 1px solid #ffffff; }
+        .action-btn { cursor: pointer; font-size: 11px; font-weight: 700; border: none; padding: 4px 8px; border-radius: 6px; }
 
-        .modal-overlay { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.6); display: none; place-items: center; z-index: 3000; backdrop-filter: blur(4px); }
-        .modal-box { width: 440px; background: #ffffff; padding: 25px; border-radius: 16px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.2); }
+        /* Overlays */
+        #loginOverlay, #zoneSelectModal, #importModal { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.7); display: grid; place-items: center; z-index: 2000; backdrop-filter: blur(4px); }
+        .modal-box { width: 380px; background: #ffffff; padding: 30px; border-radius: 20px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); }
 
-        .panel-credit { margin-top: 20px; padding-top: 12px; border-top: 2px dashed #e2e8f0; font-size: 11px; color: var(--text-muted); text-align: center; font-weight: 600; }
-        .sync-dot { display: inline-block; width: 10px; height: 10px; background: var(--success); border-radius: 50%; margin-right: 6px; box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2); }
+        .legal-footer { margin-top: 30px; padding: 15px; text-align: center; font-size: 12px; color: var(--text-muted); font-weight: 700; border-top: 2px dashed #cbd5e1; }
     </style>
 </head>
 <body>
 
 <!-- LOGIN MODAL -->
 <div id="loginOverlay">
-    <div class="login-box">
-        <h2 style="text-align:center; color:var(--primary); margin-top:0; font-size:24px; font-weight:800;">PHARMA<span style="color:#4f46e5">SYNC</span></h2>
-        <p style="text-align:center; color:var(--text-muted); font-size:12px; margin-top:-10px; margin-bottom:20px; font-weight:600;">Multi-Zone Pharmacy Management</p>
-        <input type="text" id="loginUser" placeholder="Username">
+    <div class="modal-box">
+        <h2 style="text-align:center; color:var(--primary); font-size:24px; font-weight:800; margin-top:0;">PHARMA<span style="color:var(--secondary)">SYNC</span></h2>
+        <p style="text-align:center; color:var(--text-muted); font-size:12px; margin-top:-10px; margin-bottom:20px;">System Architecture by Debanjan Singha</p>
+        <input type="text" id="loginUser" placeholder="Username or Phone Number">
         <input type="password" id="loginPass" placeholder="Password">
-        <button class="primary-btn" style="height:45px; font-size:14px;" onclick="login()">LOG IN</button>
-        <p id="errMsg" style="color:var(--danger); font-size:12px; text-align:center; margin-top:12px; margin-bottom:0; font-weight:700;"></p>
+        <button class="primary-btn" style="height:45px;" onclick="login()">SECURE LOG IN</button>
+        <p id="errMsg" style="color:var(--danger); font-size:12px; text-align:center; margin-top:12px; font-weight:700;"></p>
     </div>
 </div>
 
-<!-- IMPORT MODAL (ADMIN ONLY) -->
-<div id="importModal" class="modal-overlay">
+<!-- MULTI-ZONE SELECTION MODAL -->
+<div id="zoneSelectModal" style="display:none;">
     <div class="modal-box">
-        <h2 style="margin-top:0; color:var(--primary); font-size:16px;">📥 Bulk Import Master Directory</h2>
-        <p style="font-size:12px; color:var(--text-muted); margin-bottom:10px;">Paste drug names below (separated by commas or newlines):</p>
-        <textarea id="importRawText" rows="6" placeholder="PARACETAMOL 500MG&#10;AMOXICILLIN 250MG&#10;IBUPROFEN 400MG"></textarea>
+        <h2 style="color:var(--primary); font-size:18px; margin-top:0;">🌐 Select Assigned Zone</h2>
+        <p style="font-size:12px; color:var(--text-muted);">Select active workspace to proceed:</p>
+        <select id="userZoneDropdown" style="height:40px;"></select>
+        <button class="primary-btn" onclick="confirmZoneSelection()">ENTER WORKSPACE</button>
+    </div>
+</div>
+
+<!-- DUAL IMPORT MODAL (JSON / EXCEL) -->
+<div id="importModal" style="display:none;">
+    <div class="modal-box" style="width:450px;">
+        <h2 id="importTitle" style="color:var(--primary); font-size:16px; margin-top:0;">📥 Import File</h2>
+        <p style="font-size:12px; color:var(--text-muted);">Upload .JSON or .XLSX / .XLS File</p>
+        <input type="file" id="importFileInput" accept=".json, .xlsx, .xls">
         
         <div style="display:flex; gap:8px; margin-top:15px;">
-            <button class="primary-btn" style="background:var(--danger);" onclick="executeImport('reset')">Reset & Add</button>
-            <button class="primary-btn" style="background:var(--success);" onclick="executeImport('merge')">Merge & Add</button>
+            <button class="primary-btn" style="background:var(--success);" onclick="processImport('merge')">Merge with Existing</button>
+            <button class="primary-btn" style="background:var(--danger);" onclick="processImport('reset')">Reset & Add New</button>
             <button class="primary-btn" style="background:#64748b;" onclick="closeImportModal()">Cancel</button>
         </div>
     </div>
@@ -419,38 +478,74 @@ app.get('/', (req, res) => {
     <!-- TOP HEADER -->
     <div class="header-bar">
         <div>
-            <h1 style="margin:0; font-size:22px; color:var(--text-main); font-weight:800; display:inline-block;">PHARMA<span style="color:var(--primary)">SYNC</span> PRO</h1>
-            <span id="zoneBadge" class="badge" style="margin-left:12px; font-size:12px; background:#e0f2fe; color:#0284c7;">ZONE</span>
+            <h1 style="margin:0; font-size:22px; font-weight:800; display:inline-block;">PHARMA<span style="color:var(--primary)">SYNC</span> PRO</h1>
+            <span id="activeZoneBadge" class="badge" style="margin-left:12px;">ZONE: UNASSIGNED</span>
         </div>
         <div style="display:flex; align-items:center; gap:12px;">
-            <span style="font-size:13px; color:var(--text-muted); font-weight:700;"><span class="sync-dot"></span>LIVE AUTO-SYNC</span>
-            <span id="uName" style="font-weight:800; color:var(--primary); background:#ffffff; padding:6px 14px; border-radius:8px; border:1px solid #bae6fd;"></span>
-            <button onclick="exportBackup()" style="background:var(--secondary); color:white; border:none; padding:10px 14px; border-radius:8px; cursor:pointer; font-weight:700; font-size:12px;">💾 BACKUP</button>
-            <button onclick="logout()" style="background:var(--danger); color:white; border:none; padding:10px 14px; border-radius:8px; cursor:pointer; font-weight:700; font-size:12px;">LOGOUT</button>
+            <span id="uNameDisplay" style="font-weight:800; color:var(--primary); background:#ffffff; padding:6px 14px; border-radius:8px; border:1px solid #bae6fd;"></span>
+            <button onclick="logout()" style="background:var(--danger); color:white; border:none; padding:8px 14px; border-radius:8px; cursor:pointer; font-weight:700; font-size:12px;">LOGOUT</button>
         </div>
     </div>
 
+    <!-- MAIN APP INTERFACE -->
     <div class="app-grid">
-        <!-- LEFT COLUMN: MASTER DIRECTORY & ADMIN USER MONITOR -->
+        
+        <!-- LEFT COLUMN: MASTER DIRECTORY & OPERATOR TOOLING -->
         <div>
-            <!-- ADMIN ACCESS CONTROL (VISIBLE TO ADMIN ONLY) -->
-            <div id="adminPanel" class="panel" style="display:none; border:2px solid #c7d2fe;">
-                <h2>👑 Admin Access & Users</h2>
-                <input type="text" id="newU" placeholder="New Username">
-                <input type="password" id="newP" placeholder="New Password">
-                <input type="text" id="newZ" placeholder="Assign Zone (e.g., ER-WARD)">
-                <select id="newR"><option value="OPERATOR">OPERATOR</option><option value="ADMIN">ADMIN</option></select>
-                <button class="primary-btn" style="background:var(--success); color:white; margin-bottom:15px;" onclick="createUser()">CREATE USER</button>
+            <!-- MASTER DIRECTORY PANEL -->
+            <div class="panel">
+                <h2>
+                    <span>📦 Master Directory</span>
+                    <button id="masterImportBtn" style="display:none; background:var(--secondary); color:white; border:none; padding:4px 8px; border-radius:6px; font-size:11px; cursor:pointer;" onclick="openImportModal('master')">📥 Import</button>
+                </h2>
+                
+                <div id="operatorMasterControls">
+                    <input type="text" id="newDrugName" placeholder="Register New Drug Name...">
+                    <button class="primary-btn" onclick="registerDrug()">ADD TO MASTER</button>
+                </div>
 
-                <h3 style="font-size:12px; color:var(--text-muted); margin-bottom:6px; font-weight:800;">User Activity Stats</h3>
-                <div class="table-wrap" style="max-height: 160px;">
+                <input type="text" style="margin-top:12px" onkeyup="filterTable('masterBody', this.value)" placeholder="Search master list...">
+                <div class="table-wrap" style="max-height: 250px;">
                     <table>
-                        <thead><tr><th>User/Zone</th><th>Entries</th><th>Status</th><th>Action</th></tr></thead>
+                        <thead><tr><th>Drug Name</th><th>Actions</th></tr></thead>
+                        <tbody id="masterBody"></tbody>
+                    </table>
+                </div>
+
+                <div style="margin-top:10px;">
+                    <button class="primary-btn" style="background:#64748b;" onclick="downloadMasterDirectoryBackup()">💾 Backup Master Directory (JSON)</button>
+                </div>
+            </div>
+
+            <!-- ADMIN CONSOLE (VISIBLE SOLELY TO ADMIN) -->
+            <div id="adminPanel" class="panel" style="display:none; border:2px solid #c7d2fe;">
+                <h2>👑 Admin Workspace & Users</h2>
+                
+                <!-- Admin Self Credential Editing -->
+                <div style="background:#f1f5f9; padding:10px; border-radius:10px; margin-bottom:15px;">
+                    <span style="font-size:11px; font-weight:800; color:var(--primary);">UPDATE ADMIN CREDENTIALS</span>
+                    <input type="text" id="admNewU" placeholder="New Admin Username" style="margin-top:5px;">
+                    <input type="password" id="admNewP" placeholder="New Password">
+                    <button class="primary-btn" style="background:var(--secondary);" onclick="updateAdminProfile()">UPDATE ADMIN LOGIN</button>
+                </div>
+
+                <!-- User Creation -->
+                <span style="font-size:11px; font-weight:800; color:var(--text-muted);">ASSIGN NEW OPERATOR</span>
+                <input type="text" id="nuName" placeholder="Full Name">
+                <input type="text" id="nuPhone" placeholder="Phone Number">
+                <input type="password" id="nuPass" placeholder="Password">
+                <input type="text" id="nuZones" placeholder="Assigned Zones (Comma separated e.g. NORTH, SOUTH)">
+                <button class="primary-btn" style="background:var(--success); margin-bottom:15px;" onclick="createUser()">CREATE USER</button>
+
+                <span style="font-size:11px; font-weight:800; color:var(--text-muted);">USER DIRECTORY & ACCESS CONTROL</span>
+                <div class="table-wrap" style="max-height: 140px;">
+                    <table>
+                        <thead><tr><th>User / Phone</th><th>Zones</th><th>Access</th></tr></thead>
                         <tbody id="adminUserList"></tbody>
                     </table>
                 </div>
 
-                <h3 style="font-size:12px; color:var(--text-muted); margin-top:15px; margin-bottom:6px; font-weight:800;">Login/Logout Audit Log</h3>
+                <span style="font-size:11px; font-weight:800; color:var(--text-muted); margin-top:10px; display:block;">LOGIN / LOGOUT ACTIVITY LOGS</span>
                 <div class="table-wrap" style="max-height: 140px;">
                     <table>
                         <thead><tr><th>Time</th><th>User</th><th>Action</th></tr></thead>
@@ -458,446 +553,522 @@ app.get('/', (req, res) => {
                     </table>
                 </div>
             </div>
-
-            <!-- MASTER DRUG DIRECTORY (ZONE SPECIFIC) -->
-            <div class="panel">
-                <h2>
-                    <span>📦 Zone Master Directory</span>
-                    <button id="importBtn" style="display:none; background:#4f46e5; color:white; border:none; padding:4px 8px; border-radius:6px; font-size:11px; font-weight:700; cursor:pointer;" onclick="openImportModal()">📥 Import</button>
-                </h2>
-                <input type="text" id="newDrugName" placeholder="New drug name..." onkeydown="if(event.key==='Enter') registerDrug()">
-                <button class="primary-btn" style="background:#0284c7;" onclick="registerDrug()">REGISTER DRUG</button>
-                
-                <input type="text" style="margin-top:15px" onkeyup="filterTable('masterBody', this.value)" placeholder="Search zone directory...">
-                <div class="table-wrap" style="max-height:220px;">
-                    <table>
-                        <tbody id="masterBody"></tbody>
-                    </table>
-                </div>
-                
-                <div class="panel-credit">
-                    © 2026 <b>Debanjan Singha</b><br>
-                    System Architect & Lead Developer
-                </div>
-            </div>
         </div>
 
-        <!-- CENTER COLUMN: DISPENSE CONSOLE & DAILY TOTALS -->
-        <div class="panel">
+        <!-- CENTER COLUMN: DISPENSE CONSOLE & TODAY'S TOTALS (OPERATORS ONLY) -->
+        <div id="operatorWorkspace" class="panel">
             <h2>🛒 Dispense Console</h2>
-            <div style="display: grid; grid-template-columns: 1fr 110px; gap: 10px;">
-                <input type="text" id="searchDrug" list="drugList" placeholder="Select Drug..." onkeydown="if(event.key==='Enter') document.getElementById('dispenseAmount').focus()">
-                <input type="number" id="dispenseAmount" placeholder="Qty" onkeydown="if(event.key==='Enter') dispenseDrug()">
+            <div style="display: grid; grid-template-columns: 1fr 120px; gap: 10px;">
+                <input type="text" id="searchDrug" list="drugList" placeholder="Select or Type Drug...">
+                <input type="number" id="dispenseAmount" placeholder="Qty">
             </div>
             <datalist id="drugList"></datalist>
 
-            <div class="qty-grid">
-                <button class="qty-pill" onclick="setQty(1)">1</button>
-                <button class="qty-pill" onclick="setQty(5)">5</button>
-                <button class="qty-pill" onclick="setQty(10)">10</button>
-                <button class="qty-pill" onclick="setQty(15)">15</button>
-                <button class="qty-pill" onclick="setQty(20)">20</button>
-                <button class="qty-pill" onclick="setQty(30)">30</button>
-                <button class="qty-pill" onclick="setQty(60)">60</button>
-                <button class="qty-pill" onclick="setQty(120)">120</button>
-            </div>
-            <button class="primary-btn" style="background:var(--success); color:white; height:45px; font-size:15px;" id="recordBtn" onclick="dispenseDrug()">RECORD ENTRY</button>
+            <button class="primary-btn" style="background:var(--success); height:40px; font-size:14px;" onclick="dispenseDrug()">RECORD DISPENSE</button>
 
-            <!-- ZONE SPECIFIC ACTION CONTROLS: UNDO AND RESET TOTALS -->
-            <div style="display:flex; gap:10px; margin-top:15px;">
-                <button class="primary-btn" style="background:#f59e0b; color:white; font-size:12px;" onclick="undoLastEntry()">↩️ UNDO LAST ENTRY</button>
-                <button class="primary-btn" style="background:#ef4444; color:white; font-size:12px;" onclick="resetZoneTotals()">🚨 RESET TOTALS & HISTORY</button>
-            </div>
-
-            <h2 style="margin-top:25px;">📊 Today's Cumulative Totals</h2>
-            <input type="text" onkeyup="filterTable('dailyBody', this.value)" placeholder="Filter totals...">
-            <div class="table-wrap" style="max-height: 260px;">
+            <h2>
+                <span>📊 Today's Cumulative Totals</span>
+                <button style="background:var(--secondary); color:white; border:none; padding:4px 8px; border-radius:6px; font-size:11px; cursor:pointer;" onclick="openImportModal('dispense')">📥 Import Totals</button>
+            </h2>
+            <input type="text" onkeyup="filterTable('dailyBody', this.value)" placeholder="Filter daily total...">
+            <div class="table-wrap" style="max-height: 300px;">
                 <table>
-                    <thead><tr><th>Drug Name</th><th>Total Quantity</th></tr></thead>
+                    <thead><tr><th>Drug Name</th><th>Total Dispensed</th></tr></thead>
                     <tbody id="dailyBody"></tbody>
                 </table>
             </div>
         </div>
 
-        <!-- RIGHT COLUMN: LIVE RECENT HISTORY & PDF REPORTING -->
-        <div>
+        <!-- RIGHT COLUMN: LIVE RECENT HISTORY & REPORTING -->
+        <div id="reportingWorkspace">
             <div class="panel">
-                <h2>
-                    <span>🕒 Live Zone Feed</span>
-                    <select id="filterZoneSelect" onchange="syncData()" style="width:auto; margin-bottom:0; padding:2px 8px; font-size:11px; display:none;">
-                        <option value="ALL">All Zones</option>
-                    </select>
-                </h2>
-                <div class="table-wrap" style="max-height: 320px;">
+                <h2>🕒 Recent Activity History</h2>
+                <div class="table-wrap" style="max-height: 280px;">
                     <table>
-                        <thead><tr><th>Time</th><th>Details</th><th>By</th><th></th></tr></thead>
+                        <thead><tr><th>Time</th><th>Drug & Qty</th><th>By</th><th>Action</th></tr></thead>
                         <tbody id="historyBody"></tbody>
                     </table>
                 </div>
             </div>
 
             <div class="panel">
-                <h2>📄 Report Generation</h2>
-                <input type="text" id="pdfRemarks" placeholder="Enter report remarks (Mandatory)...">
-                <button class="primary-btn" style="background:var(--danger); color:white; height:42px;" onclick="generateReport()">GENERATE PDF REPORT</button>
+                <h2>📄 Mandatory PDF & Backup Exports</h2>
+                <input type="text" id="pdfRemarks" placeholder="Enter mandatory remarks prior to download...">
+                
+                <button class="primary-btn" style="background:var(--danger); margin-bottom:10px;" onclick="generatePdfReport()">EXPORT PDF REPORT</button>
+                <button class="primary-btn" style="background:var(--primary); margin-bottom:10px;" onclick="downloadDispenseHistoryBackup()">EXPORT HISTORY BACKUP (JSON)</button>
+                <button class="primary-btn" style="background:var(--secondary);" onclick="downloadFullZoneBackup()">EXPORT COMPLETE ZONE BACKUP (JSON)</button>
             </div>
         </div>
+
+    </div>
+
+    <div class="legal-footer">
+        © 2026 <b>Debanjan Singha</b>. All Legal Credits Reserved. <br>
+        Unauthorized replication, distribution, or execution without express written permission is strictly prohibited and subject to legal prosecution.
     </div>
 </div>
 
 <script>
-    let token = localStorage.getItem('p_token'), 
-        role = localStorage.getItem('p_role'), 
-        user = localStorage.getItem('p_user'), 
-        zone = localStorage.getItem('p_zone');
+    let token = localStorage.getItem('ps_token');
+    let role = localStorage.getItem('ps_role');
+    let user = localStorage.getItem('ps_user');
+    let userZones = JSON.parse(localStorage.getItem('ps_zones') || "[]");
+    let activeZone = localStorage.getItem('ps_active_zone') || "";
 
     let masterList = [];
     let liveDispenseLog = [];
     let dailyTotals = {};
+    let activeImportTarget = "";
 
     // AUTHENTICATION
     async function login() {
-        const u = document.getElementById('loginUser').value.trim(), p = document.getElementById('loginPass').value.trim();
-        const res = await fetch('/api/login', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username: u, password: p}) });
+        const u = document.getElementById('loginUser').value.trim();
+        const p = document.getElementById('loginPass').value.trim();
+        
+        const res = await fetch('/api/login', { 
+            method: 'POST', 
+            headers: {'Content-Type': 'application/json'}, 
+            body: JSON.stringify({username: u, password: p}) 
+        });
+        
         const d = await res.json();
         if(res.ok) {
-            localStorage.setItem('p_token', d.token); 
-            localStorage.setItem('p_role', d.role); 
-            localStorage.setItem('p_user', d.username); 
-            localStorage.setItem('p_zone', d.zone);
-            location.reload();
-        } else { 
-            document.getElementById('errMsg').innerText = d.error || "Login failed"; 
+            localStorage.setItem('ps_token', d.token);
+            localStorage.setItem('ps_role', d.role);
+            localStorage.setItem('ps_user', d.username);
+            localStorage.setItem('ps_zones', JSON.stringify(d.zones));
+            
+            token = d.token; role = d.role; user = d.username; userZones = d.zones;
+
+            if(role === 'OPERATOR') {
+                if(userZones.length > 1) {
+                    promptZoneSelection(userZones);
+                } else {
+                    setActiveZone(userZones[0] || 'DEFAULT');
+                }
+            } else {
+                setActiveZone('ALL');
+            }
+        } else {
+            document.getElementById('errMsg').innerText = d.error || d.message || "Login failed";
         }
     }
 
-    async function logout() { 
+    function promptZoneSelection(zones) {
+        document.getElementById('loginOverlay').style.display = 'none';
+        const dropdown = document.getElementById('userZoneDropdown');
+        dropdown.innerHTML = zones.map(z => `<option value="${z}">${z}</option>`).join('');
+        document.getElementById('zoneSelectModal').style.display = 'grid';
+    }
+
+    function confirmZoneSelection() {
+        const selected = document.getElementById('userZoneDropdown').value;
+        document.getElementById('zoneSelectModal').style.display = 'none';
+        setActiveZone(selected);
+    }
+
+    function setActiveZone(zName) {
+        activeZone = zName;
+        localStorage.setItem('ps_active_zone', zName);
+        location.reload();
+    }
+
+    async function logout() {
         if(token) {
-            await fetch('/api/logout', { method: 'POST', headers: {'Authorization': 'Bearer ' + token} });
+            await fetch('/api/logout', { 
+                method: 'POST', 
+                headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+                body: JSON.stringify({ zone: activeZone })
+            });
         }
-        localStorage.clear(); 
-        location.reload(); 
+        localStorage.clear();
+        location.reload();
     }
 
-    // MASTER DIRECTORY MANAGEMENT (ZONE SPECIFIC)
+    // MASTER DIRECTORY MANAGEMENT
     async function loadMasterDrugs() {
-        const selectedZone = (role === 'ADMIN' && document.getElementById('filterZoneSelect')) ? document.getElementById('filterZoneSelect').value : zone;
-        const res = await fetch('/api/master-drugs?zone=' + encodeURIComponent(selectedZone), { headers: {'Authorization': 'Bearer ' + token} });
+        if(!activeZone) return;
+        const res = await fetch('/api/master-drugs?zone=' + encodeURIComponent(activeZone), { 
+            headers: {'Authorization': 'Bearer ' + token} 
+        });
         if(res.ok) {
             masterList = await res.json();
-            document.getElementById('masterBody').innerHTML = masterList.map(item => \`
+            document.getElementById('masterBody').innerHTML = masterList.map(item => `
                 <tr>
-                    <td><b>\${item}</b></td>
-                    <td style="text-align:right">
-                        <button class="action-btn" style="background:var(--danger); color:white;" onclick="removeDrug('\${item}')">Del</button>
+                    <td><b>${item}</b></td>
+                    <td>
+                        <button class="action-btn" style="background:#e0f2fe; color:#0284c7;" onclick="renameDrug('${item}')">Edit</button>
                     </td>
                 </tr>
-            \`).join('');
-            document.getElementById('drugList').innerHTML = masterList.map(m => \`<option value="\${m}">\`).join('');
+            `).join('');
+            document.getElementById('drugList').innerHTML = masterList.map(m => `<option value="${m}">`).join('');
         }
     }
 
     async function registerDrug() {
-        const i = document.getElementById('newDrugName');
-        const name = i.value.trim().toUpperCase();
-        if (!name) return alert("Enter a valid drug name.");
-        
-        const selectedZone = (role === 'ADMIN' && document.getElementById('filterZoneSelect')) ? document.getElementById('filterZoneSelect').value : zone;
+        const input = document.getElementById('newDrugName');
+        const name = input.value.trim().toUpperCase();
+        if(!name) return alert("Enter valid drug name.");
 
         const res = await fetch('/api/master-drugs', {
             method: 'POST',
             headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
-            body: JSON.stringify({ drug_name: name, zone: selectedZone })
+            body: JSON.stringify({ drug_name: name, zone: activeZone })
         });
-        if(res.ok) { i.value = ''; loadMasterDrugs(); }
+        if(res.ok) { input.value = ''; loadMasterDrugs(); }
     }
 
-    async function removeDrug(name) {
-        if(confirm("Delete drug from this zone's master directory?")) {
-            const selectedZone = (role === 'ADMIN' && document.getElementById('filterZoneSelect')) ? document.getElementById('filterZoneSelect').value : zone;
-            await fetch('/api/master-drugs/' + encodeURIComponent(name) + '?zone=' + encodeURIComponent(selectedZone), { method: 'DELETE', headers: {'Authorization': 'Bearer ' + token} });
-            loadMasterDrugs();
-        }
-    }
+    async function renameDrug(oldName) {
+        const newName = prompt(`Rename ${oldName} across master directory and all recorded history:`, oldName);
+        if(!newName || newName.trim().toUpperCase() === oldName) return;
 
-    // ADMIN BULK IMPORT MODAL FUNCTIONS
-    function openImportModal() { document.getElementById('importModal').style.display = 'grid'; }
-    function closeImportModal() { document.getElementById('importModal').style.display = 'none'; }
-
-    async function executeImport(mode) {
-        const raw = document.getElementById('importRawText').value;
-        const drugsArr = raw.split(/[,\\n]/).map(d => d.trim()).filter(d => d.length > 0);
-        
-        if(drugsArr.length === 0) return alert("Please paste drug names first.");
-
-        const selectedZone = document.getElementById('filterZoneSelect') ? document.getElementById('filterZoneSelect').value : zone;
-
-        const res = await fetch('/api/master-drugs/import', {
-            method: 'POST',
+        const res = await fetch('/api/master-drugs/rename', {
+            method: 'PUT',
             headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
-            body: JSON.stringify({ mode: mode, drugs: drugsArr, zone: selectedZone })
+            body: JSON.stringify({ oldName, newName: newName.trim().toUpperCase(), zone: activeZone })
         });
 
-        const d = await res.json();
         if(res.ok) {
-            alert(d.message);
-            document.getElementById('importRawText').value = '';
-            closeImportModal();
             loadMasterDrugs();
-        } else {
-            alert(d.error || "Import failed");
+            syncData();
         }
     }
 
-    // DISPENSE & AUTO SYNC
-    function setQty(v) { 
-        document.getElementById('dispenseAmount').value = v; 
-        document.getElementById('recordBtn').focus(); 
-    }
-
+    // DISPENSE CONSOLE
     async function dispenseDrug() {
-        const nI = document.getElementById('searchDrug'), aI = document.getElementById('dispenseAmount');
-        const name = nI.value.trim().toUpperCase(), qty = parseInt(aI.value);
-        if (!name || isNaN(qty) || qty <= 0) return alert("Select drug and valid quantity");
+        const drugInput = document.getElementById('searchDrug');
+        const qtyInput = document.getElementById('dispenseAmount');
+
+        const drug_name = drugInput.value.trim();
+        const qty = parseInt(qtyInput.value, 10);
+
+        if(!drug_name || isNaN(qty) || qty <= 0) return alert("Select drug and enter positive quantity.");
 
         const res = await fetch('/api/dispense', {
             method: 'POST',
             headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
-            body: JSON.stringify({ drug_name: name, qty: qty, zone: (role === 'ADMIN' ? document.getElementById('filterZoneSelect').value : zone) })
+            body: JSON.stringify({ drug_name, qty, zone: activeZone })
         });
 
         if(res.ok) {
-            nI.value = ''; aI.value = '';
-            nI.focus();
+            drugInput.value = ''; qtyInput.value = '';
             syncData();
         }
     }
 
-    // UNDO & RESET ACTIONS WITH MANDATORY CONFIRMATION
-    async function undoLastEntry() {
-        if (!confirm("⚠️ CONFIRMATION: Are you sure you want to UNDO the last dispense entry for your zone?")) return;
-
-        const res = await fetch('/api/dispense/undo', {
-            method: 'POST',
-            headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
-            body: JSON.stringify({ zone: (role === 'ADMIN' ? document.getElementById('filterZoneSelect').value : zone) })
-        });
-
-        const d = await res.json();
-        if (res.ok) {
-            alert(d.message);
-            syncData();
-        } else {
-            alert(d.error || "Could not undo entry.");
-        }
-    }
-
-    async function resetZoneTotals() {
-        if (!confirm("🚨 WARNING: This action will PERMANENTLY ERASE all totals and history for this zone! Proceed?")) return;
-
-        const res = await fetch('/api/dispense/reset-zone', {
-            method: 'POST',
-            headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
-            body: JSON.stringify({ zone: (role === 'ADMIN' ? document.getElementById('filterZoneSelect').value : zone) })
-        });
-
-        const d = await res.json();
-        if (res.ok) {
-            alert(d.message);
-            syncData();
-        } else {
-            alert(d.error || "Reset failed.");
-        }
-    }
-
-    async function syncData() {
-        if(!token) return;
-
-        let url = '/api/dispense/sync';
-        if(role === 'ADMIN' && document.getElementById('filterZoneSelect')) {
-            const selectedFilter = document.getElementById('filterZoneSelect').value;
-            url += '?zone=' + selectedFilter;
-        }
-
-        const res = await fetch(url, { headers: {'Authorization': 'Bearer ' + token} });
-        const data = await res.json();
-
-        if(res.status === 403 && data.error === 'ACCOUNT_DISABLED') {
-            alert("Your account has been disabled by the Administrator.");
-            logout();
-            return;
-        }
-
-        if(res.ok) {
-            liveDispenseLog = data;
-            
-            // Calculate Daily Totals
-            dailyTotals = {};
-            liveDispenseLog.forEach(i => {
-                dailyTotals[i.drug_name] = (dailyTotals[i.drug_name] || 0) + i.qty;
-            });
-
-            // Render Totals
-            document.getElementById('dailyBody').innerHTML = Object.keys(dailyTotals).sort().map(k => \`
-                <tr><td><b>\${k}</b></td><td><span class="badge">\${dailyTotals[k]}</span></td></tr>
-            \`).join('');
-
-            // Render Live Feed
-            document.getElementById('historyBody').innerHTML = liveDispenseLog.map(i => \`
-                <tr>
-                    <td><small style="color:var(--text-muted); font-weight:700;">\${new Date(i.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</small></td>
-                    <td><b>\${i.drug_name}</b> (\${i.qty})<br><small style="color:var(--primary); font-weight:800;">\${i.zone}</small></td>
-                    <td><small>\${i.entered_by}</small></td>
-                    <td><button class="action-btn" style="background:var(--danger); color:white;" onclick="deleteEntry(\${i.id})">X</button></td>
-                </tr>
-            \`).join('');
-        }
-    }
-
-    async function deleteEntry(id) {
-        if(confirm("Remove this individual entry?")) {
+    async function editDispense(id, currentQty) {
+        const newQty = prompt("Enter updated quantity (Set 0 to delete):", currentQty);
+        if(newQty === null) return;
+        
+        if(parseInt(newQty) === 0) {
             await fetch('/api/dispense/' + id, { method: 'DELETE', headers: {'Authorization': 'Bearer ' + token} });
+        } else {
+            await fetch('/api/dispense/' + id, {
+                method: 'PUT',
+                headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+                body: JSON.stringify({ qty: newQty })
+            });
+        }
+        syncData();
+    }
+
+    // DATA SYNC & TOTALS RENDERING
+    async function syncData() {
+        if(!token || !activeZone) return;
+
+        const res = await fetch('/api/dispense/sync?zone=' + encodeURIComponent(activeZone), {
+            headers: {'Authorization': 'Bearer ' + token}
+        });
+
+        if(res.status === 403) {
+            alert("ERROR! PLEASE CONTACT TO THE ADMIN");
+            return logout();
+        }
+
+        if(res.ok) {
+            liveDispenseLog = await res.json();
+            renderDispenseHistory();
+            calculateAndRenderDailyTotals();
+        }
+
+        if(role === 'ADMIN') {
+            loadAdminUserMetrics();
+            loadAdminAuditLogs();
+        }
+    }
+
+    function renderDispenseHistory() {
+        document.getElementById('historyBody').innerHTML = liveDispenseLog.map(item => `
+            <tr>
+                <td style="font-size:10px; color:var(--text-muted);">${new Date(item.timestamp).toLocaleTimeString()}</td>
+                <td><b>${item.drug_name}</b> <span class="badge">${item.qty}</span></td>
+                <td>${item.entered_by}</td>
+                <td>
+                    <button class="action-btn" style="background:#fef3c7; color:#d97706;" onclick="editDispense(${item.id}, ${item.qty})">Edit</button>
+                </td>
+            </tr>
+        `).join('');
+    }
+
+    function calculateAndRenderDailyTotals() {
+        dailyTotals = {};
+        liveDispenseLog.forEach(row => {
+            dailyTotals[row.drug_name] = (dailyTotals[row.drug_name] || 0) + Number(row.qty);
+        });
+
+        document.getElementById('dailyBody').innerHTML = Object.keys(dailyTotals).sort().map(drug => `
+            <tr>
+                <td><b>${drug}</b></td>
+                <td><span class="badge" style="background:#dcfce7; color:#15803d; font-size:12px;">${dailyTotals[drug]}</span></td>
+            </tr>
+        `).join('');
+    }
+
+    // DUAL IMPORT SYSTEM (JSON & EXCEL)
+    function openImportModal(target) {
+        activeImportTarget = target;
+        document.getElementById('importTitle').innerText = target === 'master' ? "📥 Import Master Directory" : "📥 Import Today's Totals";
+        document.getElementById('importModal').style.display = 'grid';
+    }
+
+    function closeImportModal() {
+        document.getElementById('importModal').style.display = 'none';
+        document.getElementById('importFileInput').value = '';
+    }
+
+    async function processImport(mode) {
+        const fileInput = document.getElementById('importFileInput');
+        if(!fileInput.files.length) return alert("Select a JSON or Excel file first.");
+
+        const file = fileInput.files[0];
+        const fileName = file.name.toLowerCase();
+
+        let parsedData = [];
+
+        if(fileName.endsWith('.json')) {
+            const text = await file.text();
+            parsedData = JSON.parse(text);
+        } else if(fileName.endsWith('.xlsx') || fileName.endsWith('.xls')) {
+            const data = await file.arrayBuffer();
+            const workbook = XLSX.read(data, {type: 'array'});
+            const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+            parsedData = XLSX.utils.sheet_to_json(firstSheet);
+        } else {
+            return alert("Unsupported file format. Please upload .json, .xlsx, or .xls");
+        }
+
+        let endpoint = activeImportTarget === 'master' ? '/api/master-drugs/import' : '/api/dispense/import';
+        let payload = {};
+
+        if(activeImportTarget === 'master') {
+            // Standardize array of strings
+            const drugs = parsedData.map(d => typeof d === 'string' ? d : (d.drug_name || d.DRUG_NAME || Object.values(d)[0]));
+            payload = { mode, drugs, zone: activeZone };
+        } else {
+            // Standardize array of {drug_name, qty}
+            const records = parsedData.map(r => ({
+                drug_name: r.drug_name || r.DRUG_NAME || Object.values(r)[0],
+                qty: r.qty || r.QTY || Object.values(r)[1] || 1
+            }));
+            payload = { mode, records, zone: activeZone };
+        }
+
+        const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+
+        if(res.ok) {
+            alert((await res.json()).message);
+            closeImportModal();
+            loadMasterDrugs();
             syncData();
         }
     }
 
-    // ADMIN CONTROLS & AUDIT LOGS
-    async function loadAdminData() {
-        if(role !== 'ADMIN') return;
+    // ADMIN CONTROLS
+    async function updateAdminProfile() {
+        const newUsername = document.getElementById('admNewU').value.trim();
+        const newPassword = document.getElementById('admNewP').value.trim();
 
-        const resU = await fetch('/api/users', { headers: {'Authorization': 'Bearer ' + token} });
-        const users = await resU.json();
-        if(resU.ok) {
-            document.getElementById('adminUserList').innerHTML = users.map(u => \`
-                <tr>
-                    <td><b>\${u.username}</b><br><small style="color:var(--text-muted); font-weight:700;">\${u.zone}</small></td>
-                    <td><span class="badge">\${u.total_entries}</span></td>
-                    <td><span class="badge \${u.status ? 'badge-on':'badge-off'}">\${u.status ? 'ON':'OFF'}</span></td>
-                    <td>
-                        \${u.username !== 'admin' ? \`
-                            <button class="action-btn \${u.status ? '':'badge-on'}" style="background:\${u.status ? 'var(--danger)':'var(--success)'}; color:white;" onclick="toggleUser(\${u.id}, \${u.status ? 0 : 1})">\${u.status ? 'OFF':'ON'}</button>
-                        \` : ''}
-                    </td>
-                </tr>
-            \`).join('');
-
-            // Filter zones dropdown
-            const zones = [...new Set(users.map(u => u.zone))].filter(z => z !== 'ALL');
-            const filterSelect = document.getElementById('filterZoneSelect');
-            const currentSelected = filterSelect.value;
-            filterSelect.innerHTML = '<option value="ALL">All Zones</option>' + zones.map(z => \`<option value="\${z}">\${z}</option>\`).join('');
-            if(currentSelected) filterSelect.value = currentSelected;
-        }
-
-        const resA = await fetch('/api/admin/audit-logs', { headers: {'Authorization': 'Bearer ' + token} });
-        const audit = await resA.json();
-        if(resA.ok) {
-            document.getElementById('auditLogBody').innerHTML = audit.map(a => \`
-                <tr>
-                    <td><small style="color:var(--text-muted); font-weight:700;">\${new Date(a.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</small></td>
-                    <td><b>\${a.username}</b></td>
-                    <td><span class="badge \${a.action === 'LOGIN' ? 'badge-on':'badge-off'}">\${a.action}</span></td>
-                </tr>
-            \`).join('');
+        const res = await fetch('/api/admin/profile', {
+            method: 'PUT',
+            headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+            body: JSON.stringify({ newUsername, newPassword })
+        });
+        
+        const d = await res.json();
+        if(res.ok) {
+            alert(d.message);
+            logout();
+        } else {
+            alert(d.error);
         }
     }
 
     async function createUser() {
-        const u = document.getElementById('newU').value.trim(), 
-              p = document.getElementById('newP').value.trim(), 
-              z = document.getElementById('newZ').value.trim(), 
-              r = document.getElementById('newR').value;
+        const username = document.getElementById('nuName').value.trim();
+        const phone = document.getElementById('nuPhone').value.trim();
+        const password = document.getElementById('nuPass').value.trim();
+        const zones = document.getElementById('nuZones').value.split(',').map(z => z.trim()).filter(z => z);
 
-        if(!u || !p || !z) return alert("Fill in username, password, and zone");
-
-        const res = await fetch('/api/users', { 
-            method: 'POST', 
-            headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'}, 
-            body: JSON.stringify({username: u, password: p, zone: z, role: r}) 
+        const res = await fetch('/api/users', {
+            method: 'POST',
+            headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+            body: JSON.stringify({ username, phone, password, zones })
         });
-        
-        const d = await res.json();
+
         if(res.ok) {
-            alert("User Created Successfully!");
-            document.getElementById('newU').value = ''; 
-            document.getElementById('newP').value = ''; 
-            document.getElementById('newZ').value = '';
-            loadAdminData();
+            document.getElementById('nuName').value = ''; document.getElementById('nuPhone').value = '';
+            document.getElementById('nuPass').value = ''; document.getElementById('nuZones').value = '';
+            loadAdminUserMetrics();
         } else {
-            alert(d.error || "User creation failed");
+            alert((await res.json()).error);
         }
     }
 
-    async function toggleUser(id, status) {
-        await fetch('/api/users/' + id + '/status', { method: 'PUT', headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'}, body: JSON.stringify({status}) });
-        loadAdminData();
+    async function loadAdminUserMetrics() {
+        const res = await fetch('/api/users', { headers: {'Authorization': 'Bearer ' + token} });
+        if(res.ok) {
+            const users = await res.json();
+            document.getElementById('adminUserList').innerHTML = users.map(u => `
+                <tr>
+                    <td><b>${u.username}</b><br><small>${u.phone}</small></td>
+                    <td><small>${u.zones.join(', ')}</small></td>
+                    <td>
+                        <button class="action-btn" style="background:${u.status === 1 ? '#fee2e2' : '#dcfce7'}; color:${u.status === 1 ? '#ef4444' : '#15803d'};" onclick="toggleUserStatus(${u.id}, ${u.status === 1 ? 0 : 1})">
+                            ${u.status === 1 ? 'TURN OFF' : 'TURN ON'}
+                        </button>
+                    </td>
+                </tr>
+            `).join('');
+        }
     }
 
-    // PDF REPORTING
-    function generateReport() {
-        const r = document.getElementById('pdfRemarks').value.trim();
-        if (!r) return alert("Remarks Required");
-        const { jsPDF } = window.jspdf; 
-        const doc = new jsPDF();
-        
-        doc.setFontSize(16);
-        doc.text("PHARMA-SYNC PRO DAILY REPORT", 14, 20);
-        doc.setFontSize(10); 
-        doc.text("Generated: " + new Date().toLocaleString() + " | Zone: " + zone + " | Remarks: " + r, 14, 28);
-        
-        doc.autoTable({ 
-            startY: 35, 
-            head: [['Drug Name', 'Total Dispense Quantity']], 
-            body: Object.keys(dailyTotals).sort().map(k => [k, dailyTotals[k]]),
-            didDrawPage: function (data) {
-                if (doc.internal.getNumberOfPages() === 1) {
-                    doc.setFontSize(8);
-                    doc.text("System Architect: Debanjan Singha", 14, doc.internal.pageSize.height - 10);
-                }
-            }
+    async function toggleUserStatus(id, status) {
+        await fetch(`/api/users/${id}/status`, {
+            method: 'PUT',
+            headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+            body: JSON.stringify({ status })
         });
-        
-        doc.save("PharmaReport_" + Date.now() + ".pdf");
+        loadAdminUserMetrics();
     }
 
-    function exportBackup() {
-        const blob = new Blob([JSON.stringify({ master: masterList, dispenses: liveDispenseLog })], {type: 'application/json'});
-        const a = document.createElement('a'); 
-        a.href = URL.createObjectURL(blob); 
-        a.download = "PharmaBackup_" + Date.now() + ".json"; 
+    async function loadAdminAuditLogs() {
+        const res = await fetch('/api/admin/audit-logs', { headers: {'Authorization': 'Bearer ' + token} });
+        if(res.ok) {
+            const logs = await res.json();
+            document.getElementById('auditLogBody').innerHTML = logs.map(l => `
+                <tr>
+                    <td style="font-size:10px;">${new Date(l.timestamp).toLocaleTimeString()}</td>
+                    <td><b>${l.username}</b></td>
+                    <td><span class="badge">${l.action}</span></td>
+                </tr>
+            `).join('');
+        }
+    }
+
+    // BACKUP & MANDATORY PDF EXPORT ROUTINES
+    function generatePdfReport() {
+        const remarks = document.getElementById('pdfRemarks').value.trim();
+        if(!remarks) return alert("ERROR: Remarks field is mandatory before generating PDF report.");
+
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF();
+
+        // Header Section
+        doc.setFontSize(16);
+        doc.setTextColor(2, 132, 199);
+        doc.text("PHARMA-SYNC PRO | CUMULATIVE DISPENSE REPORT", 14, 15);
+
+        doc.setFontSize(10);
+        doc.setTextColor(100, 116, 139);
+        doc.text(`Date & Time: ${new Date().toLocaleString()}`, 14, 23);
+        doc.text(`Zone Name: ${activeZone}`, 14, 29);
+        doc.text(`Mandatory Remarks: ${remarks}`, 14, 35);
+
+        // Daily Summary Table
+        const tableData = Object.keys(dailyTotals).sort().map(drug => [drug, dailyTotals[drug]]);
+        doc.autoTable({
+            startY: 42,
+            head: [['Drug Name', 'Total Quantity Dispensed']],
+            body: tableData,
+            theme: 'striped',
+            headStyles: { fillColor: [2, 132, 199] }
+        });
+
+        // Footers on Every Page
+        const pageCount = doc.internal.getNumberOfPages();
+        for (let i = 1; i <= pageCount; i++) {
+            doc.setPage(i);
+            doc.setFontSize(9);
+            doc.setTextColor(150, 150, 150);
+            doc.text("Lead Developer: Debanjan Singha", 14, doc.internal.pageSize.height - 10);
+            doc.text(`Page ${i} of ${pageCount}`, doc.internal.pageSize.width - 25, doc.internal.pageSize.height - 10);
+        }
+
+        doc.save(`Report_${activeZone}_${Date.now()}.pdf`);
+    }
+
+    function downloadJSON(data, fileName) {
+        const remarks = document.getElementById('pdfRemarks').value.trim();
+        if(!remarks) return alert("ERROR: Remarks field is mandatory prior to backup download.");
+
+        const blob = new Blob([JSON.stringify({ remarks, zone: activeZone, exportDate: new Date(), data }, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = fileName;
         a.click();
     }
 
-    function filterTable(id, val) {
-        const rows = document.getElementById(id).rows; 
-        const s = val.toUpperCase();
-        for (let r of rows) r.style.display = r.innerText.toUpperCase().includes(s) ? "" : "none";
+    function downloadMasterDirectoryBackup() {
+        downloadJSON(masterList, `MasterDirectory_${activeZone}_Backup.json`);
+    }
+
+    function downloadDispenseHistoryBackup() {
+        downloadJSON(liveDispenseLog, `DispenseHistory_${activeZone}_Backup.json`);
+    }
+
+    function downloadFullZoneBackup() {
+        downloadJSON({ masterDirectory: masterList, dispenseHistory: liveDispenseLog, totals: dailyTotals }, `FullZone_${activeZone}_Backup.json`);
+    }
+
+    function filterTable(tableId, query) {
+        const term = query.toLowerCase();
+        const rows = document.getElementById(tableId).getElementsByTagName('tr');
+        for (let r of rows) {
+            r.style.display = r.innerText.toLowerCase().includes(term) ? '' : 'none';
+        }
     }
 
     // INITIALIZATION
-    if(token) {
-        document.getElementById('loginOverlay').style.display = 'none';
-        document.getElementById('uName').innerText = user;
-        document.getElementById('zoneBadge').innerText = zone;
+    window.onload = function() {
+        if(token) {
+            document.getElementById('loginOverlay').style.display = 'none';
+            document.getElementById('uNameDisplay').innerText = user;
+            document.getElementById('activeZoneBadge').innerText = "ZONE: " + activeZone;
 
-        if(role === 'ADMIN') {
-            document.getElementById('adminPanel').style.display = 'block';
-            document.getElementById('importBtn').style.display = 'inline-block';
-            document.getElementById('filterZoneSelect').style.display = 'inline-block';
-            loadAdminData();
+            if(role === 'ADMIN') {
+                document.getElementById('adminPanel').style.display = 'block';
+                document.getElementById('masterImportBtn').style.display = 'inline-block';
+                document.getElementById('operatorWorkspace').style.display = 'none';
+            } else {
+                loadMasterDrugs();
+                syncData();
+                setInterval(syncData, 5000); // 5-second live auto-sync
+            }
+        } else {
+            document.getElementById('loginOverlay').style.display = 'grid';
         }
-
-        loadMasterDrugs();
-        syncData();
-        setInterval(() => {
-            syncData();
-            if(role === 'ADMIN') loadAdminData();
-        }, 3000); // 3-second auto-sync loop
-    }
+    };
 </script>
 </body>
 </html>
     `);
 });
 
-app.listen(PORT, () => console.log(`Pharma-Sync Pro running on port ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`Pharma-Sync Pro Server actively running on http://localhost:${PORT}`);
+});

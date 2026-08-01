@@ -66,6 +66,31 @@ const authenticateToken = (req, res, next) => {
     });
 };
 
+// Data Extraction & Normalization Helper
+function extractDrugNames(item) {
+    if (!item) return [];
+    let rawStr = "";
+    
+    if (typeof item === 'string') {
+        rawStr = item;
+    } else if (typeof item === 'object') {
+        const keys = Object.keys(item);
+        const matchKey = keys.find(k => /drug|name|item|product|title|description/i.test(k));
+        if (matchKey && item[matchKey]) {
+            rawStr = String(item[matchKey]);
+        } else if (keys.length > 0 && item[keys[0]]) {
+            rawStr = String(item[keys[0]]);
+        }
+    }
+
+    if (!rawStr) return [];
+    // Split combined strings if drugs are delimited by commas, semicolons, or newlines
+    return rawStr
+        .split(/[\n\r,;]+/)
+        .map(s => s.trim().toUpperCase())
+        .filter(s => s.length > 0);
+}
+
 // ==========================================
 // BACKEND API ROUTES
 // ==========================================
@@ -229,7 +254,7 @@ app.delete('/api/master-drugs', authenticateToken, (req, res) => {
     });
 });
 
-// Resilient Master Import Engine
+// Enhanced Resilient Master Import Engine
 app.post('/api/master-drugs/import', authenticateToken, (req, res) => {
     const mode = req.body.mode;
     let drugs = req.body.drugs;
@@ -243,18 +268,16 @@ app.post('/api/master-drugs/import', authenticateToken, (req, res) => {
         const stmt = db.prepare("INSERT OR IGNORE INTO master_drugs (zone, drug_name) VALUES (?, ?)");
         
         let importedCount = 0;
-        drugs.forEach(d => {
-            if (d) {
-                const nameStr = typeof d === 'object' ? (d.drug_name || d.name || d.DrugName || d.item || Object.values(d)[0]) : d;
-                if (nameStr) {
-                    stmt.run(zone, String(nameStr).trim().toUpperCase());
-                    importedCount++;
-                }
-            }
+        drugs.forEach(item => {
+            const parsedNames = extractDrugNames(item);
+            parsedNames.forEach(dName => {
+                stmt.run(zone, dName);
+                importedCount++;
+            });
         });
         
         stmt.finalize(() => {
-            res.json({ message: `Master Directory imported successfully. Processed ${importedCount} items.` });
+            res.json({ message: `Master Directory imported successfully. Added ${importedCount} individual drug items.` });
         });
     });
 });
@@ -295,14 +318,21 @@ app.post('/api/dispense/import', authenticateToken, (req, res) => {
     db.serialize(() => {
         if (mode === 'reset') db.run("DELETE FROM dispenses WHERE zone = ?", [zone]);
         const stmt = db.prepare("INSERT INTO dispenses (zone, drug_name, qty, entered_by) VALUES (?, ?, ?, ?)");
+        
+        let importedCount = 0;
         records.forEach(r => {
-            if (r) {
-                const dName = typeof r === 'object' ? (r.drug_name || r.name || r.DrugName || Object.values(r)[0]) : r;
-                const dQty = typeof r === 'object' ? (r.qty || r.amount || r.Quantity || 1) : 1;
-                if (dName) stmt.run(zone, String(dName).trim().toUpperCase(), parseInt(dQty), req.user.username);
+            const parsedNames = extractDrugNames(r);
+            let dQty = 1;
+            if (typeof r === 'object' && r !== null) {
+                dQty = parseInt(r.qty || r.amount || r.Quantity || r.quantity || 1);
             }
+            parsedNames.forEach(dName => {
+                stmt.run(zone, dName, isNaN(dQty) ? 1 : dQty, req.user.username);
+                importedCount++;
+            });
         });
-        stmt.finalize(() => res.json({ message: "Totals imported successfully." }));
+
+        stmt.finalize(() => res.json({ message: `Totals imported successfully. Added ${importedCount} records.` }));
     });
 });
 
@@ -400,7 +430,6 @@ app.get('/', (req, res) => {
         '                        <span style="font-size:12px; font-weight:bold; color:var(--text-muted);">ACTIVE ZONE:</span>',
         '                        <span id="single-zone-name" class="badge" style="background:var(--sidebar); color:white; font-size:13px; padding:6px 12px;">-</span>',
         '                    </div>',
-        '                    <button id="rollbackBtn" style="background:var(--warning); color:white; border:none; padding:8px 12px; border-radius:6px; cursor:pointer; font-weight:bold; display:none; margin-bottom:0; width:auto;" onclick="undoImport()">↩ UNDO (<span id="rollbackCount">0</span>)</button>',
         '                    <button onclick="handleLogout()" class="primary-btn danger" style="margin-bottom:0; width:auto; padding:8px 16px;">LOGOUT</button>',
         '                </div>',
         '            </div>',
@@ -559,7 +588,6 @@ app.get('/', (req, res) => {
         '        let dispenseHistory = [];',
         '        let dailyLog = {};',
         '        let availableZonesList = [];',
-        '        let rollbackStack = [];',
 
         '        if (token) checkSession();',
 
@@ -703,7 +731,6 @@ app.get('/', (req, res) => {
         '            const hRes = await fetch(`/api/dispense/sync?zone=${activeZone}`, { headers: { "Authorization": "Bearer " + token } });',
         '            dispenseHistory = await hRes.json();',
 
-        '            // Compute Cumulative Daily Totals (Additive Progression)',
         '            dailyLog = {};',
         '            dispenseHistory.forEach(h => {',
         '                dailyLog[h.drug_name] = (dailyLog[h.drug_name] || 0) + h.qty;',
@@ -713,7 +740,6 @@ app.get('/', (req, res) => {
         '        }',
 
         '        function updateUI() {',
-        '            // Render Master Table',
         '            renderTable("masterBody", masterDrugsList.sort(), (item) => `',
         '                <td>${item}</td>',
         '                <td style="text-align:right">',
@@ -721,10 +747,8 @@ app.get('/', (req, res) => {
         '                </td>',
         '            `);',
 
-        '            // Render Cumulative Totals Table',
         '            renderTable("dailyBody", Object.keys(dailyLog).sort(), (k) => `<td>${k}</td><td><span class="badge">${dailyLog[k]}</span></td>`);',
 
-        '            // Render Dispense History Log',
         '            renderTable("historyBody", dispenseHistory.slice(0, 50), (i) => `',
         '                <td><span style="color:gray; font-size:10px">${i.timestamp}</span><br>${i.drug_name} (<b>${i.qty}</b>) - <i style="font-size:11px">${i.entered_by}</i></td>',
         '                <td style="text-align:right">',
@@ -733,7 +757,6 @@ app.get('/', (req, res) => {
         '                </td>',
         '            `);',
 
-        '            // Populate Auto-complete Datalist',
         '            document.getElementById("drugList").innerHTML = masterDrugsList.map(m => `<option value="${m}">`).join("");',
         '        }',
 
@@ -758,8 +781,6 @@ app.get('/', (req, res) => {
         '            i.value = "";',
         '            syncUserData();',
         '        }',
-
-        '        async function recordDispense() { dispenseDrug(); }',
 
         '        async function dispenseDrug() {',
         '            const nI = document.getElementById("searchDrug");',
@@ -924,6 +945,19 @@ app.get('/', (req, res) => {
         '            if (res.ok) { alert("User created successfully"); loadAdminData(); } else { alert("Failed to create user"); }',
         '        }',
 
+        '        // Resilient JSON & File Normalizer',
+        '        function normalizeImportData(rawData) {',
+        '            let items = rawData;',
+        '            if (typeof items === "string") {',
+        '                try { items = JSON.parse(items); } catch(e) {}',
+        '            }',
+        '            if (!Array.isArray(items) && typeof items === "object" && items !== null) {',
+        '                const firstArrayKey = Object.keys(items).find(k => Array.isArray(items[k]));',
+        '                items = firstArrayKey ? items[firstArrayKey] : [items];',
+        '            }',
+        '            return Array.isArray(items) ? items : [items];',
+        '        }',
+
         '        async function processImport(type, mode) {',
         '            const targetZone = document.getElementById("admin-import-zone").value;',
         '            const fileInput = document.getElementById("admin-file-import");',
@@ -937,10 +971,10 @@ app.get('/', (req, res) => {
         '                const reader = new FileReader();',
         '                reader.onload = async (e) => {',
         '                    try {',
-        '                        let jsonArr = JSON.parse(e.target.result);',
-        '                        if (!Array.isArray(jsonArr)) jsonArr = [jsonArr];',
-        '                        sendImportPayload(type, mode, targetZone, jsonArr);',
-        '                    } catch(err) { alert("Invalid JSON"); }',
+        '                        let parsedData = JSON.parse(e.target.result);',
+        '                        const normalizedArr = normalizeImportData(parsedData);',
+        '                        sendImportPayload(type, mode, targetZone, normalizedArr);',
+        '                    } catch(err) { alert("Invalid JSON file format."); }',
         '                };',
         '                reader.readAsText(file);',
         '            } else if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {',

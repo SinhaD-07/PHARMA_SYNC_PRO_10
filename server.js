@@ -37,6 +37,7 @@ function initDb() {
     db.run("CREATE TABLE IF NOT EXISTS master_drugs (id INTEGER PRIMARY KEY AUTOINCREMENT, zone TEXT, drug_name TEXT, UNIQUE(zone, drug_name))");
     db.run("CREATE TABLE IF NOT EXISTS dispenses (id INTEGER PRIMARY KEY AUTOINCREMENT, zone TEXT, drug_name TEXT, qty INTEGER, entered_by TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)");
     db.run("CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, phone TEXT, zone TEXT, action TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)");
+    db.run("CREATE TABLE IF NOT EXISTS zone_registry (id INTEGER PRIMARY KEY AUTOINCREMENT, zone_name TEXT UNIQUE)");
 
     db.get("SELECT * FROM users WHERE role = 'ADMIN'", async (err, row) => {
         if (!row) {
@@ -46,7 +47,7 @@ function initDb() {
     });
 }
 
-// Authentication Middleware (Strict 8-Hour Session Enforcement & Access Control)
+// Authentication Middleware (Strict 8-Hour Session Enforcement)
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
@@ -150,6 +151,31 @@ app.put('/api/users/:id/status', authenticateToken, (req, res) => {
     });
 });
 
+app.delete('/api/users/:id', authenticateToken, (req, res) => {
+    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required." });
+    db.run("DELETE FROM users WHERE id = ?", [req.params.id], (err) => {
+        res.json({ message: "User account permanently removed." });
+    });
+});
+
+// Zone Registry Endpoints
+app.get('/api/zones', authenticateToken, (req, res) => {
+    db.all("SELECT zone_name FROM zone_registry ORDER BY zone_name ASC", [], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows.map(r => r.zone_name));
+    });
+});
+
+app.post('/api/zones', authenticateToken, (req, res) => {
+    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required." });
+    const zName = req.body.zone_name ? req.body.zone_name.trim().toUpperCase() : "";
+    if (!zName) return res.status(400).json({ error: "Zone name cannot be empty." });
+
+    db.run("INSERT OR IGNORE INTO zone_registry (zone_name) VALUES (?)", [zName], (err) => {
+        res.json({ message: "Zone registered successfully." });
+    });
+});
+
 app.get('/api/admin/audit-logs', authenticateToken, (req, res) => {
     if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required." });
     db.all("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 200", [], (err, rows) => {
@@ -185,10 +211,20 @@ app.post('/api/master-drugs/import', authenticateToken, (req, res) => {
     const mode = req.body.mode;
     const drugs = req.body.drugs;
     const zone = req.body.zone;
+
+    if (!zone || !Array.isArray(drugs)) {
+        return res.status(400).json({ error: "Invalid payload or unselected target zone." });
+    }
+
     db.serialize(() => {
         if (mode === 'reset') db.run("DELETE FROM master_drugs WHERE zone = ?", [zone]);
         const stmt = db.prepare("INSERT OR IGNORE INTO master_drugs (zone, drug_name) VALUES (?, ?)");
-        drugs.forEach(d => { if (d) stmt.run(zone, String(d).trim().toUpperCase()); });
+        drugs.forEach(d => {
+            if (d) {
+                const nameStr = typeof d === 'object' ? (d.drug_name || d.name || Object.values(d)[0]) : d;
+                if (nameStr) stmt.run(zone, String(nameStr).trim().toUpperCase());
+            }
+        });
         stmt.finalize(() => res.json({ message: "Master Directory imported successfully." }));
     });
 });
@@ -218,16 +254,25 @@ app.post('/api/dispense/import', authenticateToken, (req, res) => {
     const mode = req.body.mode;
     const records = req.body.records;
     const zone = req.body.zone;
+
+    if (!zone || !Array.isArray(records)) {
+        return res.status(400).json({ error: "Invalid payload or unselected target zone." });
+    }
+
     db.serialize(() => {
         if (mode === 'reset') db.run("DELETE FROM dispenses WHERE zone = ?", [zone]);
         const stmt = db.prepare("INSERT INTO dispenses (zone, drug_name, qty, entered_by) VALUES (?, ?, ?, ?)");
-        records.forEach(r => { if (r.drug_name) stmt.run(zone, String(r.drug_name).trim().toUpperCase(), parseInt(r.qty || 1), req.user.username); });
+        records.forEach(r => {
+            const dName = r.drug_name || r.name || Object.values(r)[0];
+            const dQty = r.qty || r.amount || 1;
+            if (dName) stmt.run(zone, String(dName).trim().toUpperCase(), parseInt(dQty), req.user.username);
+        });
         stmt.finalize(() => res.json({ message: "Totals imported successfully." }));
     });
 });
 
 // ==========================================
-// SINGLE-FILE WEB APPLICATION INTERFACE
+// SINGLE-FILE JOYFUL & COLOURFUL WEB INTERFACE
 // ==========================================
 
 app.get('/', (req, res) => {
@@ -237,80 +282,99 @@ app.get('/', (req, res) => {
         '<head>',
         '    <meta charset="UTF-8">',
         '    <meta name="viewport" content="width=device-width, initial-scale=1.0">',
-        '    <title>PHARMA-SYNC PRO</title>',
+        '    <title>PHARMA-SYNC PRO | Joyful Workspace</title>',
         '    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>',
         '    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.23/jspdf.plugin.autotable.min.js"></script>',
         '    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>',
         '    <style>',
-        '        * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }',
-        '        body { background: #0f172a; color: #f8fafc; min-height: 100vh; padding: 20px; }',
-        '        .container { max-width: 1100px; margin: 0 auto; }',
-        '        .card { background: #1e293b; border-radius: 12px; padding: 24px; margin-bottom: 20px; border: 1px solid #334155; }',
-        '        h1, h2, h3 { color: #38bdf8; margin-bottom: 15px; }',
-        '        input, select, button { width: 100%; padding: 12px; margin-bottom: 12px; border-radius: 6px; border: 1px solid #475569; background: #0f172a; color: white; }',
-        '        button { background: #0284c7; font-weight: bold; cursor: pointer; border: none; transition: 0.2s; }',
-        '        button:hover { background: #0369a1; }',
-        '        button.danger { background: #ef4444; }',
-        '        button.danger:hover { background: #dc2626; }',
-        '        table { width: 100%; border-collapse: collapse; margin-top: 10px; }',
-        '        th, td { border: 1px solid #334155; padding: 10px; text-align: left; font-size: 14px; }',
-        '        th { background: #0f172a; color: #38bdf8; }',
+        '        * { box-sizing: border-box; margin: 0; padding: 0; font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif; }',
+        '        body { background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #064e3b 100%); color: #f8fafc; min-height: 100vh; padding: 25px; }',
+        '        .container { max-width: 1200px; margin: 0 auto; }',
+        '        .card { background: rgba(30, 41, 59, 0.85); backdrop-filter: blur(12px); border-radius: 16px; padding: 28px; margin-bottom: 24px; border: 1px solid rgba(255, 255, 255, 0.12); box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3); }',
+        '        h1 { color: #38bdf8; text-shadow: 0 0 10px rgba(56, 189, 248, 0.3); }',
+        '        h2 { color: #a78bfa; margin-bottom: 12px; }',
+        '        h3 { color: #34d399; margin-bottom: 14px; font-size: 1.2rem; }',
+        '        input, select, button { width: 100%; padding: 12px 16px; margin-bottom: 14px; border-radius: 10px; border: 1px solid #475569; background: #0f172a; color: white; font-size: 14px; outline: none; transition: all 0.2s ease-in-out; }',
+        '        input:focus, select:focus { border-color: #38bdf8; box-shadow: 0 0 8px rgba(56, 189, 248, 0.4); }',
+        '        button { background: linear-gradient(135deg, #0284c7 0%, #2563eb 100%); font-weight: bold; cursor: pointer; border: none; box-shadow: 0 4px 12px rgba(2, 132, 199, 0.3); }',
+        '        button:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(2, 132, 199, 0.5); }',
+        '        button.success { background: linear-gradient(135deg, #059669 0%, #10b981 100%); box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3); }',
+        '        button.danger { background: linear-gradient(135deg, #dc2626 0%, #f43f5e 100%); box-shadow: 0 4px 12px rgba(220, 38, 38, 0.3); }',
+        '        button.warning { background: linear-gradient(135deg, #d97706 0%, #f59e0b 100%); }',
+        '        table { width: 100%; border-collapse: separate; border-spacing: 0; margin-top: 12px; border-radius: 10px; overflow: hidden; }',
+        '        th, td { padding: 12px 16px; text-align: left; font-size: 14px; border-bottom: 1px solid #334155; }',
+        '        th { background: #1e293b; color: #38bdf8; font-weight: 600; }',
+        '        tr:nth-child(even) { background: rgba(15, 23, 42, 0.4); }',
+        '        tr:hover { background: rgba(51, 65, 85, 0.5); }',
         '        .hidden { display: none !important; }',
-        '        .flex { display: flex; gap: 10px; }',
-        '        .badge { background: #0369a1; padding: 4px 8px; border-radius: 4px; font-size: 12px; }',
-        '        .footer { text-align: center; font-size: 12px; color: #94a3b8; margin-top: 30px; border-top: 1px solid #334155; padding-top: 15px; }',
+        '        .flex { display: flex; gap: 12px; align-items: center; }',
+        '        .badge { background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%); padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; display: inline-block; }',
+        '        .zone-checkbox-group { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; background: #0f172a; padding: 12px; border-radius: 10px; border: 1px solid #475569; }',
+        '        .zone-checkbox-item { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #cbd5e1; cursor: pointer; }',
+        '        .zone-checkbox-item input { width: auto; margin: 0; }',
+        '        .footer { text-align: center; font-size: 13px; color: #a78bfa; margin-top: 40px; border-top: 1px solid rgba(255, 255, 255, 0.1); padding-top: 20px; }',
         '    </style>',
         '</head>',
         '<body>',
         '    <div class="container">',
-        '        <div id="login-screen" class="card" style="max-width: 450px; margin: 80px auto;">',
-        '            <h2>PHARMA-SYNC PRO</h2>',
-        '            <p style="color: #94a3b8; margin-bottom: 20px; font-size: 14px;">Secure Authorization Gateway</p>',
+        '        <div id="login-screen" class="card" style="max-width: 450px; margin: 80px auto; text-align: center;">',
+        '            <h1>PHARMA-SYNC PRO</h1>',
+        '            <p style="color: #cbd5e1; margin-top: 6px; margin-bottom: 24px; font-size: 14px;">Enterprise Pharmaceutical Directory System</p>',
         '            <input type="text" id="login-username" placeholder="Username or Phone Number">',
         '            <input type="password" id="login-password" placeholder="Password">',
-        '            <button onclick="handleLogin()">AUTHENTICATE LOGIN</button>',
-        '            <div id="login-error" style="color: #f87171; font-size: 13px; text-align: center; margin-top: 10px;"></div>',
+        '            <button onclick="handleLogin()" class="success" style="padding: 14px; margin-top: 10px;">AUTHENTICATE LOGIN</button>',
+        '            <div id="login-error" style="color: #f87171; font-size: 13px; text-align: center; margin-top: 14px; font-weight: 600;"></div>',
         '        </div>',
 
         '        <div id="app-screen" class="hidden">',
-        '            <div class="card flex" style="justify-content: space-between; align-items: center;">',
+        '            <div class="card flex" style="justify-content: space-between; background: linear-gradient(135deg, #1e1b4b 0%, #1e293b 100%);">',
         '                <div>',
-        '                    <h2 id="user-display">Welcome</h2>',
-        '                    <span id="role-display" class="badge">ROLE</span>',
+        '                    <h1 id="user-display" style="font-size: 1.8rem;">Welcome</h1>',
+        '                    <span id="role-display" class="badge" style="margin-top: 6px;">ROLE</span>',
         '                </div>',
-        '                <div style="width: 200px;">',
+        '                <div style="width: 160px;">',
         '                    <button onclick="handleLogout()" class="danger">LOGOUT</button>',
         '                </div>',
         '            </div>',
 
+        '            <!-- ADMIN INTERFACE -->',
         '            <div id="admin-view" class="hidden">',
         '                <div class="card">',
-        '                    <h3>Admin Security Profile</h3>',
+        '                    <h3>🔑 Update Admin Security Credentials</h3>',
         '                    <div class="flex">',
         '                        <input type="text" id="admin-new-user" placeholder="New Admin Username">',
         '                        <input type="password" id="admin-new-pass" placeholder="New Admin Password">',
         '                    </div>',
-        '                    <button onclick="updateAdminProfile()">Update Credentials</button>',
+        '                    <button onclick="updateAdminProfile()" class="warning">Save New Credentials</button>',
         '                </div>',
 
         '                <div class="card">',
-        '                    <h3>User Access & Zone Management</h3>',
+        '                    <h3>📍 Pre-Register Zone Names</h3>',
+        '                    <div class="flex">',
+        '                        <input type="text" id="new-zone-input" placeholder="Create Zone Name (e.g. ZONE-EAST, ZONE-WEST)">',
+        '                        <button onclick="registerNewZone()" class="success" style="width: 250px;">Add Zone</button>',
+        '                    </div>',
+        '                </div>',
+
+        '                <div class="card">',
+        '                    <h3>👥 Create & Assign System Users</h3>',
         '                    <input type="text" id="nu-name" placeholder="User Full Name / Username">',
         '                    <input type="text" id="nu-phone" placeholder="Phone Number">',
         '                    <input type="password" id="nu-pass" placeholder="Account Password">',
-        '                    <input type="text" id="nu-zones" placeholder="Assigned Zones (Comma separated, e.g. Zone-A, Zone-B)">',
-        '                    <button onclick="createUser()">Create Assigned User</button>',
+        '                    <label style="font-size: 12px; color: #38bdf8; font-weight: 600; display: block; margin-bottom: 6px;">Select Assigned Zones from Registry:</label>',
+        '                    <div id="zone-checkbox-container" class="zone-checkbox-group"></div>',
+        '                    <button onclick="createUser()" class="success">Create User Account</button>',
         '                    <br><br>',
-        '                    <h3>Registered User Directory</h3>',
+        '                    <h3>Registered Users Directory</h3>',
         '                    <table>',
-        '                        <thead><tr><th>Username</th><th>Phone</th><th>Assigned Zones</th><th>Status</th><th>Access Toggle</th></tr></thead>',
+        '                        <thead><tr><th>Username</th><th>Phone</th><th>Assigned Zones</th><th>Status</th><th>Access Toggle</th><th>Remove User</th></tr></thead>',
         '                        <tbody id="users-table"></tbody>',
         '                    </table>',
         '                </div>',
 
         '                <div class="card">',
-        '                    <h3>Master Directory & Totals Import (Admin Engine)</h3>',
-        '                    <select id="admin-import-zone"><option value="">Select Target Zone</option></select>',
+        '                    <h3>📥 Master Directory & Daily Totals Bulk Import Engine</h3>',
+        '                    <select id="admin-import-zone"><option value="">-- Select Target Zone --</option></select>',
         '                    <input type="file" id="admin-file-import" accept=".json, .xlsx, .xls">',
         '                    <div class="flex">',
         '                        <button onclick="processImport(\'master\', \'merge\')">Import Master (Merge)</button>',
@@ -323,56 +387,57 @@ app.get('/', (req, res) => {
         '                </div>',
 
         '                <div class="card">',
-        '                    <h3>User Activity & System Audit Logs</h3>',
+        '                    <h3>📜 Audit Logs & User Activity</h3>',
         '                    <table>',
-        '                        <thead><tr><th>Time</th><th>User</th><th>Phone</th><th>Zones</th><th>Action</th></tr></thead>',
+        '                        <thead><tr><th>Timestamp</th><th>Username</th><th>Phone</th><th>Zone Context</th><th>Action</th></tr></thead>',
         '                        <tbody id="audit-table"></tbody>',
         '                    </table>',
         '                </div>',
         '            </div>',
 
+        '            <!-- USER INTERFACE -->',
         '            <div id="user-view" class="hidden">',
         '                <div class="card">',
-        '                    <h3>Active Working Zone Selection</h3>',
+        '                    <h3>🗺️ Select Active Working Zone</h3>',
         '                    <select id="user-zone-select" onchange="switchZone()"></select>',
         '                </div>',
 
         '                <div class="card">',
-        '                    <h3>Register New Drug to Zone Master Directory</h3>',
+        '                    <h3>💊 Register New Drug to Master Directory</h3>',
         '                    <div class="flex">',
-        '                        <input type="text" id="new-drug-name" placeholder="Drug Name (e.g., PARACETAMOL 500MG)">',
-        '                        <button onclick="registerDrug()" style="width: 250px;">Register Drug</button>',
+        '                        <input type="text" id="new-drug-name" placeholder="Drug Name (e.g. AMXOCILLIN 500MG)">',
+        '                        <button onclick="registerDrug()" class="success" style="width: 250px;">Register Drug</button>',
         '                    </div>',
         '                </div>',
 
         '                <div class="card">',
-        '                    <h3>Dispense Entry (Today\'s Total)</h3>',
+        '                    <h3>📝 Today\'s Dispense Entry</h3>',
         '                    <select id="dispense-drug-select"></select>',
         '                    <input type="number" id="dispense-qty" placeholder="Quantity">',
-        '                    <button onclick="recordDispense()">Record Dispense Entry</button>',
+        '                    <button onclick="recordDispense()">Record Entry</button>',
         '                </div>',
 
         '                <div class="card">',
-        '                    <h3>Rename Drug Master Directory Entry</h3>',
+        '                    <h3>✏️ Global Drug Rename</h3>',
         '                    <select id="rename-drug-select"></select>',
-        '                    <input type="text" id="rename-drug-new" placeholder="New Drug Name">',
-        '                    <button onclick="renameDrug()">Rename Globally</button>',
+        '                    <input type="text" id="rename-drug-new" placeholder="Updated Drug Name">',
+        '                    <button onclick="renameDrug()" class="warning">Update Drug Name Globally</button>',
         '                </div>',
 
         '                <div class="card">',
-        '                    <h3>Export & Backup Suite</h3>',
-        '                    <input type="text" id="export-remarks" placeholder="Mandatory Export Remarks (Required for PDF)">',
+        '                    <h3>💾 Export & PDF Backup Suite</h3>',
+        '                    <input type="text" id="export-remarks" placeholder="Mandatory Export Remarks (Required for PDF Generation)">',
         '                    <div class="flex">',
-        '                        <button onclick="exportPDF()">Download Zone PDF</button>',
+        '                        <button onclick="exportPDF()" class="success">Download Zone PDF</button>',
         '                        <button onclick="exportMasterJSON()">Export Master Directory JSON</button>',
-        '                        <button onclick="exportDispenseJSON()">Export Totals & History JSON</button>',
+        '                        <button onclick="exportDispenseJSON()">Export Dispense History JSON</button>',
         '                    </div>',
         '                </div>',
 
         '                <div class="card">',
-        '                    <h3>Recent Dispense Activity</h3>',
+        '                    <h3>📋 Recent Dispense Log & History</h3>',
         '                    <table>',
-        '                        <thead><tr><th>Drug Name</th><th>Qty</th><th>Recorded By</th><th>Timestamp</th><th>Actions</th></tr></thead>',
+        '                        <thead><tr><th>Drug Name</th><th>Qty</th><th>Entered By</th><th>Timestamp</th><th>Actions</th></tr></thead>',
         '                        <tbody id="history-table"></tbody>',
         '                    </table>',
         '                </div>',
@@ -381,7 +446,7 @@ app.get('/', (req, res) => {
 
         '        <div class="footer">',
         '            System Architecture & Sole Copyright Holder: <b>Debanjan Singha</b><br>',
-        '            All Rights Reserved. Copyright &copy; 2026. Unauthorized access or reproduction prohibited.',
+        '            All Rights Reserved. Copyright &copy; 2026. Unauthorized copying or deployment prohibited.',
         '        </div>',
         '    </div>',
 
@@ -391,6 +456,7 @@ app.get('/', (req, res) => {
         '        let activeZone = "";',
         '        let masterDrugsList = [];',
         '        let dispenseHistory = [];',
+        '        let availableZonesList = [];',
 
         '        if (token) checkSession();',
 
@@ -419,9 +485,7 @@ app.get('/', (req, res) => {
         '            location.reload();',
         '        }',
 
-        '        function checkSession() {',
-        '            initApp();',
-        '        }',
+        '        function checkSession() { initApp(); }',
 
         '        async function initApp() {',
         '            document.getElementById("login-screen").classList.add("hidden");',
@@ -440,23 +504,42 @@ app.get('/', (req, res) => {
         '            }',
         '        }',
 
+        '        async function registerNewZone() {',
+        '            const zInput = document.getElementById("new-zone-input").value;',
+        '            if (!zInput) return alert("Please enter a valid Zone Name.");',
+        '            const res = await fetch("/api/zones", {',
+        '                method: "POST",',
+        '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
+        '                body: JSON.stringify({ zone_name: zInput })',
+        '            });',
+        '            if (res.ok) {',
+        '                document.getElementById("new-zone-input").value = "";',
+        '                loadAdminData();',
+        '            }',
+        '        }',
+
         '        async function loadAdminData() {',
+        '            const zRes = await fetch("/api/zones", { headers: { "Authorization": "Bearer " + token } });',
+        '            availableZonesList = await zRes.json();',
+
+        '            const zoneContainer = document.getElementById("zone-checkbox-container");',
+        '            const zoneImportSelect = document.getElementById("admin-import-zone");',
+        '            zoneContainer.innerHTML = "";',
+        '            zoneImportSelect.innerHTML = \'<option value="">-- Select Target Zone --</option>\';',
+
+        '            availableZonesList.forEach(z => {',
+        '                zoneContainer.innerHTML += `<label class="zone-checkbox-item"><input type="checkbox" value="${z}" name="assigned-zones"> ${z}</label>`;',
+        '                zoneImportSelect.innerHTML += `<option value="${z}">${z}</option>`;',
+        '            });',
+
         '            const res = await fetch("/api/users", { headers: { "Authorization": "Bearer " + token } });',
         '            if (!res.ok) return handleAccessError(res);',
         '            const users = await res.json();',
         '            const tbody = document.getElementById("users-table");',
         '            tbody.innerHTML = "";',
-        '            const zoneSelect = document.getElementById("admin-import-zone");',
-        '            zoneSelect.innerHTML = \'<option value="">Select Target Zone</option>\';',
-        '            let zoneSet = new Set();',
 
         '            users.forEach(u => {',
-        '                u.zones.forEach(z => zoneSet.add(z));',
-        '                tbody.innerHTML += `<tr><td>${u.username}</td><td>${u.phone}</td><td>${u.zones.join(", ")}</td><td>${u.status ? "ACTIVE" : "DISABLED"}</td><td><button onclick="toggleUser(${u.id}, ${u.status ? 0 : 1})">${u.status ? "Disable" : "Enable"}</button></td></tr>`;',
-        '            });',
-
-        '            zoneSet.forEach(z => {',
-        '                zoneSelect.innerHTML += `<option value="${z}">${z}</option>`;',
+        '                tbody.innerHTML += `<tr><td>${u.username}</td><td>${u.phone}</td><td>${u.zones.join(", ")}</td><td>${u.status ? "ACTIVE" : "DISABLED"}</td><td><button onclick="toggleUser(${u.id}, ${u.status ? 0 : 1})" class="warning">${u.status ? "Disable" : "Enable"}</button></td><td><button onclick="removeUser(${u.id})" class="danger">Remove User</button></td></tr>`;',
         '            });',
 
         '            const auditRes = await fetch("/api/admin/audit-logs", { headers: { "Authorization": "Bearer " + token } });',
@@ -477,17 +560,69 @@ app.get('/', (req, res) => {
         '            loadAdminData();',
         '        }',
 
+        '        async function removeUser(id) {',
+        '            if (!confirm("Are you sure you want to permanently delete this user account?")) return;',
+        '            await fetch(`/api/users/${id}`, { method: "DELETE", headers: { "Authorization": "Bearer " + token } });',
+        '            loadAdminData();',
+        '        }',
+
         '        async function createUser() {',
         '            const u = document.getElementById("nu-name").value;',
         '            const p = document.getElementById("nu-phone").value;',
         '            const pass = document.getElementById("nu-pass").value;',
-        '            const z = document.getElementById("nu-zones").value.split(",").map(s => s.trim());',
+        '            const selectedCheckboxes = document.querySelectorAll(\'input[name="assigned-zones"]:checked\');',
+        '            const z = Array.from(selectedCheckboxes).map(cb => cb.value);',
+
+        '            if (!z.length) return alert("Please select at least one zone from the registry checkboxes.");',
+
         '            const res = await fetch("/api/users", {',
         '                method: "POST",',
         '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
         '                body: JSON.stringify({ username: u, phone: p, password: pass, zones: z })',
         '            });',
         '            if (res.ok) { alert("User created successfully"); loadAdminData(); } else { alert("Failed to create user"); }',
+        '        }',
+
+        '        async function processImport(type, mode) {',
+        '            const targetZone = document.getElementById("admin-import-zone").value;',
+        '            const fileInput = document.getElementById("admin-file-import");',
+        '            if (!targetZone) return alert("Please select a target zone for import.");',
+        '            if (!fileInput.files.length) return alert("Please choose a JSON or Excel file.");',
+
+        '            const file = fileInput.files[0];',
+        '            const fileName = file.name.toLowerCase();',
+
+        '            if (fileName.endsWith(".json")) {',
+        '                const reader = new FileReader();',
+        '                reader.onload = async (e) => {',
+        '                    try {',
+        '                        const jsonArr = JSON.parse(e.target.result);',
+        '                        sendImportPayload(type, mode, targetZone, jsonArr);',
+        '                    } catch(err) { alert("Invalid JSON file format."); }',
+        '                };',
+        '                reader.readAsText(file);',
+        '            } else if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {',
+        '                const reader = new FileReader();',
+        '                reader.onload = async (e) => {',
+        '                    const data = new Uint8Array(e.target.result);',
+        '                    const workbook = XLSX.read(data, { type: "array" });',
+        '                    const sheet = workbook.Sheets[workbook.SheetNames[0]];',
+        '                    const parsedRows = XLSX.utils.sheet_to_json(sheet);',
+        '                    sendImportPayload(type, mode, targetZone, parsedRows);',
+        '                };',
+        '                reader.readAsArrayBuffer(file);',
+        '            }',
+        '        }',
+
+        '        async function sendImportPayload(type, mode, zone, items) {',
+        '            const endpoint = type === "master" ? "/api/master-drugs/import" : "/api/dispense/import";',
+        '            const bodyKey = type === "master" ? "drugs" : "records";',
+        '            const res = await fetch(endpoint, {',
+        '                method: "POST",',
+        '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
+        '                body: JSON.stringify({ zone, mode, [bodyKey]: items })',
+        '            });',
+        '            if (res.ok) { alert("Import completed successfully!"); } else { alert("Import failed."); }',
         '        }',
 
         '        async function updateAdminProfile() {',
@@ -498,19 +633,21 @@ app.get('/', (req, res) => {
         '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
         '                body: JSON.stringify({ newUsername: u, newPassword: p })',
         '            });',
-        '            if (res.ok) { alert("Credentials updated. Please log in again."); handleLogout(); }',
+        '            if (res.ok) { alert("Credentials updated. Logging out..."); handleLogout(); }',
         '        }',
 
         '        async function loadUserZones() {',
-        '            const payload = JSON.parse(atob(token.split(".")[1]));',
-        '            const res = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: payload.username, password: "" }) });',
-        '            // Load zones from active token context',
+        '            const zRes = await fetch("/api/zones", { headers: { "Authorization": "Bearer " + token } });',
+        '            const allZones = await zRes.json();',
         '            const zoneSelect = document.getElementById("user-zone-select");',
         '            zoneSelect.innerHTML = "";',
-        '            const zRes = await fetch("/api/users", { headers: { "Authorization": "Bearer " + token } }).catch(() => null);',
-        '            // Fallback decoding',
-        '            activeZone = prompt("Enter your active zone to initialize session:") || "Zone-A";',
-        '            zoneSelect.innerHTML = `<option value="${activeZone}">${activeZone}</option>`;',
+        '            allZones.forEach(z => { zoneSelect.innerHTML += `<option value="${z}">${z}</option>`; });',
+        '            activeZone = zoneSelect.value || "ZONE-A";',
+        '            syncUserData();',
+        '        }',
+
+        '        function switchZone() {',
+        '            activeZone = document.getElementById("user-zone-select").value;',
         '            syncUserData();',
         '        }',
 
@@ -532,7 +669,7 @@ app.get('/', (req, res) => {
         '            const tbody = document.getElementById("history-table");',
         '            tbody.innerHTML = "";',
         '            dispenseHistory.forEach(h => {',
-        '                tbody.innerHTML += `<tr><td>${h.drug_name}</td><td>${h.qty}</td><td>${h.entered_by}</td><td>${h.timestamp}</td><td><button onclick="editQty(${h.id})">Edit</button> <button class="danger" onclick="deleteEntry(${h.id})">Undo</button></td></tr>`;',
+        '                tbody.innerHTML += `<tr><td>${h.drug_name}</td><td>${h.qty}</td><td>${h.entered_by}</td><td>${h.timestamp}</td><td><button onclick="editQty(${h.id})" class="warning">Edit</button> <button class="danger" onclick="deleteEntry(${h.id})">Undo</button></td></tr>`;',
         '            });',
         '        }',
 

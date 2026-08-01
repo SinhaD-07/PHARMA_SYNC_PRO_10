@@ -17,7 +17,7 @@ const SECRET_KEY = process.env.JWT_SECRET || "pharma_sync_ultra_secure_debanjan_
 
 const COPYRIGHT_OWNER = "Debanjan Singha";
 console.log("================================================================");
-console.log(" PHARMA-SYNC PRO | HIGH-PERFORMANCE ENTERPRISE ARCHITECTURE");
+console.log(" PHARMA-SYNC PRO | ULTRA-FAST REALTIME ENTERPRISE ENGINE");
 console.log(" Lead System Architect: " + COPYRIGHT_OWNER);
 console.log(" Copyright (c) 2026. All Rights Reserved.");
 console.log("================================================================");
@@ -43,7 +43,7 @@ function initDb() {
         db.run("CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, phone TEXT, zone TEXT, action TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)");
         db.run("CREATE TABLE IF NOT EXISTS zone_registry (id INTEGER PRIMARY KEY AUTOINCREMENT, zone_name TEXT UNIQUE)");
 
-        // High Speed Database Indexes for Instant Searching on 1,000,000+ Rows
+        // High Speed Database Indexes
         db.run("CREATE INDEX IF NOT EXISTS idx_master_zone_drug ON master_drugs(zone, drug_name)");
         db.run("CREATE INDEX IF NOT EXISTS idx_dispenses_zone ON dispenses(zone)");
 
@@ -262,7 +262,6 @@ app.delete('/api/master-drugs', authenticateToken, (req, res) => {
     });
 });
 
-// Fast Ultra-Scale Transaction Bulk Import Engine (1,000,000+ Records Compatible)
 app.post('/api/master-drugs/import', authenticateToken, (req, res) => {
     const mode = req.body.mode;
     let drugs = req.body.drugs;
@@ -304,6 +303,30 @@ app.post('/api/dispense', authenticateToken, (req, res) => {
 app.get('/api/dispense/sync', authenticateToken, (req, res) => {
     db.all("SELECT * FROM dispenses WHERE zone = ? ORDER BY id DESC LIMIT 1000", [req.query.zone], (err, rows) => {
         res.json(rows);
+    });
+});
+
+app.put('/api/dispense/adjust-cumulative', authenticateToken, (req, res) => {
+    const zone = req.body.zone;
+    const drug_name = req.body.drug_name ? req.body.drug_name.trim().toUpperCase() : "";
+    const targetQty = parseInt(req.body.new_qty);
+
+    if (!zone || !drug_name || isNaN(targetQty) || targetQty < 0) {
+        return res.status(400).json({ error: "Invalid parameters." });
+    }
+
+    db.serialize(() => {
+        db.run("DELETE FROM dispenses WHERE zone = ? AND UPPER(drug_name) = ?", [zone, drug_name], (err) => {
+            if (err) return res.status(500).json({ error: "Database update error." });
+            if (targetQty > 0) {
+                db.run("INSERT INTO dispenses (zone, drug_name, qty, entered_by) VALUES (?, ?, ?, ?)",
+                    [zone, drug_name, targetQty, req.user.username + " (Edit)"],
+                    () => res.json({ message: "Cumulative quantity updated." })
+                );
+            } else {
+                res.json({ message: "Cumulative quantity updated to 0." });
+            }
+        });
     });
 });
 
@@ -365,7 +388,7 @@ app.get('/', (req, res) => {
         '<head>',
         '    <meta charset="UTF-8">',
         '    <meta name="viewport" content="width=device-width, initial-scale=1.0">',
-        '    <title>PHARMA-SYNC PRO | SMART FOCUS</title>',
+        '    <title>PHARMA-SYNC PRO | ULTRA REALTIME ENGINE</title>',
         '    <meta name="author" content="Debanjan Singha">',
         '    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>',
         '    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.23/jspdf.plugin.autotable.min.js"></script>',
@@ -415,6 +438,8 @@ app.get('/', (req, res) => {
         '        .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: center; z-index: 1000; backdrop-filter: blur(2px); }',
         '        .panel-credit { margin-top: 20px; padding-top: 15px; border-top: 1px dashed #e2e8f0; font-size: 11px; color: var(--text-muted); text-align: center; line-height: 1.4; }',
         '        .panel-credit b { color: var(--sidebar); }',
+        '        .live-dot { height: 8px; width: 8px; background-color: var(--success); border-radius: 50%; display: inline-block; margin-right: 6px; animation: pulse 1.5s infinite; }',
+        '        @keyframes pulse { 0% { opacity: 0.4; } 50% { opacity: 1; } 100% { opacity: 0.4; } }',
         '    </style>',
         '</head>',
         '<body>',
@@ -422,7 +447,7 @@ app.get('/', (req, res) => {
         '        <!-- LOGIN SCREEN -->',
         '        <div id="login-screen" class="panel" style="max-width: 420px; margin: 80px auto; text-align: center; padding: 35px;">',
         '            <h1 style="color:var(--sidebar); font-size: 24px; margin-bottom: 5px;">PHARMA<span style="color:var(--accent)">SYNC</span> PRO</h1>',
-        '            <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 25px;">Smart Focus Enterprise Architecture</p>',
+        '            <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 25px;">Real-Time Multi-User Pharmacy Engine</p>',
         '            <input type="text" id="login-username" placeholder="Username or Phone Number" onkeydown="if(event.key===\'Enter\') document.getElementById(\'login-password\').focus()">',
         '            <input type="password" id="login-password" placeholder="Password" onkeydown="if(event.key===\'Enter\') handleLogin()">',
         '            <button onclick="handleLogin()" class="primary-btn success" style="padding: 12px; margin-top: 10px; font-size: 15px;">AUTHENTICATE LOGIN</button>',
@@ -436,9 +461,10 @@ app.get('/', (req, res) => {
         '        <!-- APPLICATION SCREEN -->',
         '        <div id="app-screen" class="hidden">',
         '            <div class="header-bar">',
-        '                <div>',
+        '                <div style="display: flex; align-items: center;">',
         '                    <h1 style="margin:0; font-size:20px; color:var(--sidebar); display: inline-block;">PHARMA<span style="color:var(--accent)">SYNC</span> PRO</h1>',
         '                    <span id="role-display" class="badge" style="margin-left: 10px;">ROLE</span>',
+        '                    <span style="margin-left: 15px; font-size: 12px; color: var(--text-muted);"><span class="live-dot"></span>LIVE AUTO-SYNC (2s)</span>',
         '                </div>',
         '                <div style="display:flex; gap:10px; align-items: center;">',
         '                    <div id="user-zone-picker-wrap" style="margin-bottom:0; width: 220px; display:none;">',
@@ -535,7 +561,7 @@ app.get('/', (req, res) => {
         '                    <div class="panel">',
         '                        <h2>🛒 Dispense Console</h2>',
         '                        <div style="display: grid; grid-template-columns: 1fr 120px; gap: 10px;">',
-        '                            <input type="text" id="searchDrug" list="drugList" placeholder="Select / Type Drug Name..." onkeydown="handleDrugNameKeydown(event)">',
+        '                            <input type="text" id="searchDrug" list="drugList" placeholder="Select / Type Drug Name..." oninput="checkDrugAutoJump(event)" onkeydown="handleDrugNameKeydown(event)">',
         '                            <input type="number" id="dispenseAmount" placeholder="Qty" onkeydown="if(event.key===\'Enter\') dispenseDrug()">',
         '                        </div>',
         '                        <datalist id="drugList"></datalist>',
@@ -552,9 +578,9 @@ app.get('/', (req, res) => {
         '                        <button class="primary-btn success" style="height: 42px; font-size:15px" id="recordBtn" onclick="dispenseDrug()">RECORD ENTRY</button>',
 
         '                        <h2 style="margin-top:25px">📊 Today\'s Cumulative Totals</h2>',
-        '                        <input type="text" onkeyup="filterTable(\'dailyBody\', this.value)" placeholder="Filter totals...">',
+        '                        <input type="text" onkeyup="filterTable(\'dailyBody\', this.value)" placeholder="Filter cumulative totals...">',
         '                        <div class="table-wrap" style="max-height: 380px;">',
-        '                            <table><thead><tr><th>Drug Name</th><th>Total Quantity</th></tr></thead><tbody id="dailyBody"></tbody></table>',
+        '                            <table><thead><tr><th>Drug Name</th><th>Total Qty</th><th style="text-align:right">Action</th></tr></thead><tbody id="dailyBody"></tbody></table>',
         '                        </div>',
         '                    </div>',
 
@@ -611,6 +637,11 @@ app.get('/', (req, res) => {
         '        let dispenseHistory = [];',
         '        let dailyLog = {};',
         '        let availableZonesList = [];',
+        '        let autoSyncTimer = null;',
+
+        '        // Smart Diff Caches to prevent unnecessary DOM thrashing & lagging',
+        '        let lastMasterCache = "";',
+        '        let lastHistoryCache = "";',
 
         '        if (token) checkSession();',
 
@@ -634,6 +665,7 @@ app.get('/', (req, res) => {
         '        }',
 
         '        function handleLogout() {',
+        '            if (autoSyncTimer) clearInterval(autoSyncTimer);',
         '            fetch("/api/logout", { method: "POST", headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ zone: activeZone }) });',
         '            localStorage.removeItem("token");',
         '            location.reload();',
@@ -657,10 +689,22 @@ app.get('/', (req, res) => {
         '            }',
         '        }',
 
+        '        // Instant focus jump to quantity when drug name is selected',
+        '        function checkDrugAutoJump(e) {',
+        '            const inputVal = e.target.value.trim().toUpperCase();',
+        '            if (masterDrugsList.includes(inputVal)) {',
+        '                const qtyInput = document.getElementById("dispenseAmount");',
+        '                qtyInput.focus();',
+        '                qtyInput.select();',
+        '            }',
+        '        }',
+
         '        function handleDrugNameKeydown(e) {',
         '            if (e.key === "Enter") {',
         '                e.preventDefault();',
-        '                document.getElementById("dispenseAmount").focus();',
+        '                const qtyInput = document.getElementById("dispenseAmount");',
+        '                qtyInput.focus();',
+        '                qtyInput.select();',
         '            }',
         '        }',
 
@@ -735,7 +779,7 @@ app.get('/', (req, res) => {
         '                pickerWrap.style.display = "none";',
         '                badgeWrap.style.display = "block";',
         '                document.getElementById("single-zone-name").innerText = activeZone;',
-        '                syncUserData();',
+        '                startAutoSync();',
         '            } else if (assignedUserZones.length > 1) {',
         '                pickerWrap.style.display = "block";',
         '                badgeWrap.style.display = "none";',
@@ -759,50 +803,94 @@ app.get('/', (req, res) => {
         '            activeZone = document.getElementById("initial-zone-select").value;',
         '            document.getElementById("user-zone-select").value = activeZone;',
         '            document.getElementById("login-zone-modal").classList.add("hidden");',
-        '            syncUserData();',
+        '            startAutoSync();',
         '        }',
 
         '        function switchZone() {',
         '            activeZone = document.getElementById("user-zone-select").value;',
+        '            lastMasterCache = "";',
+        '            lastHistoryCache = "";',
         '            syncUserData();',
         '        }',
 
-        '        async function syncUserData() {',
-        '            const mRes = await fetch(`/api/master-drugs?zone=${activeZone}`, { headers: { "Authorization": "Bearer " + token } });',
-        '            if (!mRes.ok) return handleAccessError(mRes);',
-        '            masterDrugsList = await mRes.json();',
-
-        '            const hRes = await fetch(`/api/dispense/sync?zone=${activeZone}`, { headers: { "Authorization": "Bearer " + token } });',
-        '            dispenseHistory = await hRes.json();',
-
-        '            dailyLog = {};',
-        '            dispenseHistory.forEach(h => {',
-        '                dailyLog[h.drug_name] = (dailyLog[h.drug_name] || 0) + h.qty;',
-        '            });',
-
-        '            updateUI();',
+        '        function startAutoSync() {',
+        '            syncUserData();',
+        '            if (autoSyncTimer) clearInterval(autoSyncTimer);',
+        '            // Live Background Auto-Sync every 2 seconds',
+        '            autoSyncTimer = setInterval(() => {',
+        '                if (activeZone && !document.hidden) {',
+        '                    syncUserData(true);',
+        '                }',
+        '            }, 2000);',
         '        }',
 
-        '        function updateUI() {',
-        '            renderTable("masterBody", masterDrugsList.sort(), (item) => `',
-        '                <td>${item}</td>',
-        '                <td style="text-align:right">',
-        '                    <button class="action-link" style="color:var(--warning)" onclick="editMasterDrugInline(\'${item}\')">Edit</button>',
-        '                    <button class="action-link" style="color:var(--danger)" onclick="removeDrug(\'${item}\')">Del</button>',
-        '                </td>',
-        '            `);',
+        '        async function syncUserData(isSilent = false) {',
+        '            try {',
+        '                const mRes = await fetch(`/api/master-drugs?zone=${activeZone}`, { headers: { "Authorization": "Bearer " + token } });',
+        '                if (!mRes.ok) return handleAccessError(mRes);',
+        '                const masterData = await mRes.json();',
+        '                const masterStr = JSON.stringify(masterData);',
 
-        '            renderTable("dailyBody", Object.keys(dailyLog).sort(), (k) => `<td>${k}</td><td><span class="badge">${dailyLog[k]}</span></td>`);',
+        '                const hRes = await fetch(`/api/dispense/sync?zone=${activeZone}`, { headers: { "Authorization": "Bearer " + token } });',
+        '                const historyData = await hRes.json();',
+        '                const historyStr = JSON.stringify(historyData);',
 
-        '            renderTable("historyBody", dispenseHistory.slice(0, 50), (i) => `',
-        '                <td><span style="color:gray; font-size:10px">${i.timestamp}</span><br>${i.drug_name} (<b>${i.qty}</b>) - <i style="font-size:11px">${i.entered_by}</i></td>',
-        '                <td style="text-align:right">',
-        '                    <button class="action-link" style="color:var(--warning)" onclick="editHistoryQty(${i.id}, ${i.qty})">Edit</button>',
-        '                    <button class="action-link" style="color:var(--danger)" onclick="undoTransaction(${i.id})">Undo</button>',
-        '                </td>',
-        '            `);',
+        '                let masterChanged = false;',
+        '                let historyChanged = false;',
 
-        '            document.getElementById("drugList").innerHTML = masterDrugsList.map(m => `<option value="${m}">`).join("");',
+        '                if (masterStr !== lastMasterCache) {',
+        '                    masterDrugsList = masterData;',
+        '                    lastMasterCache = masterStr;',
+        '                    masterChanged = true;',
+        '                }',
+
+        '                if (historyStr !== lastHistoryCache) {',
+        '                    dispenseHistory = historyData;',
+        '                    lastHistoryCache = historyStr;',
+        '                    historyChanged = true;',
+        '                    ',
+        '                    dailyLog = {};',
+        '                    dispenseHistory.forEach(h => {',
+        '                        dailyLog[h.drug_name] = (dailyLog[h.drug_name] || 0) + h.qty;',
+        '                    });',
+        '                }',
+
+        '                // Smart update DOM only when actual data changes',
+        '                if (masterChanged || historyChanged) {',
+        '                    updateUI(masterChanged, historyChanged);',
+        '                }',
+        '            } catch(e) { console.log("Auto sync paused...", e); }',
+        '        }',
+
+        '        function updateUI(masterChanged = true, historyChanged = true) {',
+        '            if (masterChanged) {',
+        '                renderTable("masterBody", masterDrugsList.sort(), (item) => `',
+        '                    <td>${item}</td>',
+        '                    <td style="text-align:right">',
+        '                        <button class="action-link" style="color:var(--warning)" onclick="editMasterDrugInline(\'${item}\')">Edit</button>',
+        '                        <button class="action-link" style="color:var(--danger)" onclick="removeDrug(\'${item}\')">Del</button>',
+        '                    </td>',
+        '                `);',
+        '                document.getElementById("drugList").innerHTML = masterDrugsList.map(m => `<option value="${m}">`).join("");',
+        '            }',
+
+        '            if (historyChanged) {',
+        '                renderTable("dailyBody", Object.keys(dailyLog).sort(), (k) => `',
+        '                    <td>${k}</td>',
+        '                    <td><span class="badge">${dailyLog[k]}</span></td>',
+        '                    <td style="text-align:right">',
+        '                        <button class="action-link" style="color:var(--warning)" onclick="editCumulativeQty(\'${k}\', ${dailyLog[k]})">Edit</button>',
+        '                    </td>',
+        '                `);',
+
+        '                renderTable("historyBody", dispenseHistory.slice(0, 50), (i) => `',
+        '                    <td><span style="color:gray; font-size:10px">${i.timestamp}</span><br>${i.drug_name} (<b>${i.qty}</b>) - <i style="font-size:11px">${i.entered_by}</i></td>',
+        '                    <td style="text-align:right">',
+        '                        <button class="action-link" style="color:var(--warning)" onclick="editHistoryQty(${i.id}, ${i.qty})">Edit</button>',
+        '                        <button class="action-link" style="color:var(--danger)" onclick="undoTransaction(${i.id})">Undo</button>',
+        '                    </td>',
+        '                `);',
+        '            }',
         '        }',
 
         '        function renderTable(id, data, templateFn) {',
@@ -845,6 +933,18 @@ app.get('/', (req, res) => {
         '            nI.value = ""; aI.value = "";',
         '            syncUserData();',
         '            nI.focus();',
+        '        }',
+
+        '        async function editCumulativeQty(drugName, currentQty) {',
+        '            const newQty = prompt(`Edit Cumulative Quantity for ${drugName}:`, currentQty);',
+        '            if (newQty === null || isNaN(parseInt(newQty)) || parseInt(newQty) < 0) return;',
+
+        '            await fetch("/api/dispense/adjust-cumulative", {',
+        '                method: "PUT",',
+        '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
+        '                body: JSON.stringify({ zone: activeZone, drug_name: drugName, new_qty: parseInt(newQty) })',
+        '            });',
+        '            syncUserData();',
         '        }',
 
         '        async function editHistoryQty(id, oldQty) {',

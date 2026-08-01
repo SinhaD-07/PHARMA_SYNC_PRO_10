@@ -47,7 +47,7 @@ function initDb() {
     });
 }
 
-// Authentication Middleware (Strict 8-Hour Session Enforcement)
+// Authentication Middleware
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
@@ -144,6 +144,18 @@ app.post('/api/users', authenticateToken, async (req, res) => {
     );
 });
 
+// Update Zones for an existing user
+app.put('/api/users/:id/zones', authenticateToken, (req, res) => {
+    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required." });
+    const newZones = req.body.zones;
+    if (!newZones || !newZones.length) return res.status(400).json({ error: "At least one zone must be selected." });
+    
+    db.run("UPDATE users SET zones = ? WHERE id = ?", [JSON.stringify(newZones), req.params.id], (err) => {
+        if (err) return res.status(500).json({ error: "Database error updating zones." });
+        res.json({ message: "User zones updated successfully." });
+    });
+});
+
 app.put('/api/users/:id/status', authenticateToken, (req, res) => {
     if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required." });
     db.run("UPDATE users SET status = ? WHERE id = ?", [req.body.status, req.params.id], (err) => {
@@ -207,25 +219,34 @@ app.put('/api/master-drugs/rename', authenticateToken, (req, res) => {
     });
 });
 
+// Resilient Master Import Engine
 app.post('/api/master-drugs/import', authenticateToken, (req, res) => {
     const mode = req.body.mode;
-    const drugs = req.body.drugs;
+    let drugs = req.body.drugs;
     const zone = req.body.zone;
 
-    if (!zone || !Array.isArray(drugs)) {
-        return res.status(400).json({ error: "Invalid payload or unselected target zone." });
-    }
+    if (!zone || !drugs) return res.status(400).json({ error: "Invalid payload or unselected target zone." });
+    if (!Array.isArray(drugs)) drugs = [drugs]; // Force Array conversion
 
     db.serialize(() => {
         if (mode === 'reset') db.run("DELETE FROM master_drugs WHERE zone = ?", [zone]);
         const stmt = db.prepare("INSERT OR IGNORE INTO master_drugs (zone, drug_name) VALUES (?, ?)");
+        
+        let importedCount = 0;
         drugs.forEach(d => {
             if (d) {
-                const nameStr = typeof d === 'object' ? (d.drug_name || d.name || Object.values(d)[0]) : d;
-                if (nameStr) stmt.run(zone, String(nameStr).trim().toUpperCase());
+                // Highly resilient property extraction for messy JSON
+                const nameStr = typeof d === 'object' ? (d.drug_name || d.name || d.DrugName || d.item || Object.values(d)[0]) : d;
+                if (nameStr) {
+                    stmt.run(zone, String(nameStr).trim().toUpperCase());
+                    importedCount++;
+                }
             }
         });
-        stmt.finalize(() => res.json({ message: "Master Directory imported successfully." }));
+        
+        stmt.finalize(() => {
+            res.json({ message: `Master Directory imported successfully. Processed ${importedCount} items.` });
+        });
     });
 });
 
@@ -252,20 +273,21 @@ app.delete('/api/dispense/:id', authenticateToken, (req, res) => {
 
 app.post('/api/dispense/import', authenticateToken, (req, res) => {
     const mode = req.body.mode;
-    const records = req.body.records;
+    let records = req.body.records;
     const zone = req.body.zone;
 
-    if (!zone || !Array.isArray(records)) {
-        return res.status(400).json({ error: "Invalid payload or unselected target zone." });
-    }
+    if (!zone || !records) return res.status(400).json({ error: "Invalid payload or unselected target zone." });
+    if (!Array.isArray(records)) records = [records];
 
     db.serialize(() => {
         if (mode === 'reset') db.run("DELETE FROM dispenses WHERE zone = ?", [zone]);
         const stmt = db.prepare("INSERT INTO dispenses (zone, drug_name, qty, entered_by) VALUES (?, ?, ?, ?)");
         records.forEach(r => {
-            const dName = r.drug_name || r.name || Object.values(r)[0];
-            const dQty = r.qty || r.amount || 1;
-            if (dName) stmt.run(zone, String(dName).trim().toUpperCase(), parseInt(dQty), req.user.username);
+            if (r) {
+                const dName = typeof r === 'object' ? (r.drug_name || r.name || r.DrugName || Object.values(r)[0]) : r;
+                const dQty = typeof r === 'object' ? (r.qty || r.amount || r.Quantity || 1) : 1;
+                if (dName) stmt.run(zone, String(dName).trim().toUpperCase(), parseInt(dQty), req.user.username);
+            }
         });
         stmt.finalize(() => res.json({ message: "Totals imported successfully." }));
     });
@@ -313,6 +335,9 @@ app.get('/', (req, res) => {
         '        .zone-checkbox-item { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #cbd5e1; cursor: pointer; }',
         '        .zone-checkbox-item input { width: auto; margin: 0; }',
         '        .footer { text-align: center; font-size: 13px; color: #a78bfa; margin-top: 40px; border-top: 1px solid rgba(255, 255, 255, 0.1); padding-top: 20px; }',
+        '        ',
+        '        /* Modal Styles */',
+        '        .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.8); backdrop-filter: blur(5px); z-index: 9999; display: flex; justify-content: center; align-items: center; }',
         '    </style>',
         '</head>',
         '<body>',
@@ -367,7 +392,7 @@ app.get('/', (req, res) => {
         '                    <br><br>',
         '                    <h3>Registered Users Directory</h3>',
         '                    <table>',
-        '                        <thead><tr><th>Username</th><th>Phone</th><th>Assigned Zones</th><th>Status</th><th>Access Toggle</th><th>Remove User</th></tr></thead>',
+        '                        <thead><tr><th>Username</th><th>Phone</th><th>Assigned Zones</th><th>Status</th><th>Actions</th></tr></thead>',
         '                        <tbody id="users-table"></tbody>',
         '                    </table>',
         '                </div>',
@@ -440,6 +465,20 @@ app.get('/', (req, res) => {
         '                        <thead><tr><th>Drug Name</th><th>Qty</th><th>Entered By</th><th>Timestamp</th><th>Actions</th></tr></thead>',
         '                        <tbody id="history-table"></tbody>',
         '                    </table>',
+        '                </div>',
+        '            </div>',
+        '        </div>',
+
+        '        <!-- Edit User Zones Modal -->',
+        '        <div id="edit-zones-modal" class="modal-overlay hidden">',
+        '            <div class="card" style="width: 450px; position: relative;">',
+        '                <h3>✏️ Edit User Access Zones</h3>',
+        '                <p id="edit-user-name" style="color: #38bdf8; margin-bottom: 15px; font-weight: bold;"></p>',
+        '                <div id="edit-zone-checkboxes" class="zone-checkbox-group" style="max-height: 250px; overflow-y: auto;"></div>',
+        '                <input type="hidden" id="edit-user-id">',
+        '                <div class="flex" style="margin-top: 15px;">',
+        '                    <button onclick="saveUserZones()" class="success">Update Zones</button>',
+        '                    <button onclick="closeEditModal()" class="danger">Cancel</button>',
         '                </div>',
         '            </div>',
         '        </div>',
@@ -539,7 +578,18 @@ app.get('/', (req, res) => {
         '            tbody.innerHTML = "";',
 
         '            users.forEach(u => {',
-        '                tbody.innerHTML += `<tr><td>${u.username}</td><td>${u.phone}</td><td>${u.zones.join(", ")}</td><td>${u.status ? "ACTIVE" : "DISABLED"}</td><td><button onclick="toggleUser(${u.id}, ${u.status ? 0 : 1})" class="warning">${u.status ? "Disable" : "Enable"}</button></td><td><button onclick="removeUser(${u.id})" class="danger">Remove User</button></td></tr>`;',
+        '                const zonesStr = u.zones.join(",");',
+        '                tbody.innerHTML += `<tr>',
+        '                    <td>${u.username}</td>',
+        '                    <td>${u.phone}</td>',
+        '                    <td>${u.zones.join(", ")}</td>',
+        '                    <td>${u.status ? "ACTIVE" : "DISABLED"}</td>',
+        '                    <td>',
+        '                        <button onclick="openEditModal(${u.id}, \'${u.username}\', \'${zonesStr}\')" class="success" style="padding: 6px 10px; margin-bottom: 4px;">Edit Zones</button>',
+        '                        <button onclick="toggleUser(${u.id}, ${u.status ? 0 : 1})" class="warning" style="padding: 6px 10px; margin-bottom: 4px;">${u.status ? "Disable" : "Enable"}</button>',
+        '                        <button onclick="removeUser(${u.id})" class="danger" style="padding: 6px 10px; margin-bottom: 0;">Remove</button>',
+        '                    </td>',
+        '                </tr>`;',
         '            });',
 
         '            const auditRes = await fetch("/api/admin/audit-logs", { headers: { "Authorization": "Bearer " + token } });',
@@ -549,6 +599,43 @@ app.get('/', (req, res) => {
         '            logs.forEach(l => {',
         '                auditBody.innerHTML += `<tr><td>${l.timestamp}</td><td>${l.username}</td><td>${l.phone}</td><td>${l.zone}</td><td>${l.action}</td></tr>`;',
         '            });',
+        '        }',
+
+        '        function openEditModal(id, username, currentZonesStr) {',
+        '            document.getElementById("edit-user-id").value = id;',
+        '            document.getElementById("edit-user-name").innerText = "User Account: " + username;',
+        '            const currentZones = currentZonesStr.split(",");',
+        '            const container = document.getElementById("edit-zone-checkboxes");',
+        '            container.innerHTML = "";',
+        '            availableZonesList.forEach(z => {',
+        '                const isChecked = currentZones.includes(z) ? "checked" : "";',
+        '                container.innerHTML += `<label class="zone-checkbox-item"><input type="checkbox" value="${z}" name="edit-assigned-zones" ${isChecked}> ${z}</label>`;',
+        '            });',
+        '            document.getElementById("edit-zones-modal").classList.remove("hidden");',
+        '        }',
+
+        '        function closeEditModal() {',
+        '            document.getElementById("edit-zones-modal").classList.add("hidden");',
+        '        }',
+
+        '        async function saveUserZones() {',
+        '            const id = document.getElementById("edit-user-id").value;',
+        '            const selectedCheckboxes = document.querySelectorAll(\'input[name="edit-assigned-zones"]:checked\');',
+        '            const z = Array.from(selectedCheckboxes).map(cb => cb.value);',
+        '            if (!z.length) return alert("Please select at least one zone before saving.");',
+        '            ',
+        '            const res = await fetch(`/api/users/${id}/zones`, {',
+        '                method: "PUT",',
+        '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
+        '                body: JSON.stringify({ zones: z })',
+        '            });',
+        '            if (res.ok) { ',
+        '                closeEditModal();',
+        '                loadAdminData();',
+        '            } else {',
+        '                const err = await res.json();',
+        '                alert("Update failed: " + (err.error || "Unknown error"));',
+        '            }',
         '        }',
 
         '        async function toggleUser(id, status) {',
@@ -596,9 +683,18 @@ app.get('/', (req, res) => {
         '                const reader = new FileReader();',
         '                reader.onload = async (e) => {',
         '                    try {',
-        '                        const jsonArr = JSON.parse(e.target.result);',
+        '                        let jsonArr = JSON.parse(e.target.result);',
+        '                        // Ultra-robust JSON unpacking',
+        '                        if (!Array.isArray(jsonArr)) {',
+        '                            const keys = Object.keys(jsonArr);',
+        '                            if (keys.length > 0 && Array.isArray(jsonArr[keys[0]])) {',
+        '                                jsonArr = jsonArr[keys[0]];',
+        '                            } else {',
+        '                                jsonArr = [jsonArr];',
+        '                            }',
+        '                        }',
         '                        sendImportPayload(type, mode, targetZone, jsonArr);',
-        '                    } catch(err) { alert("Invalid JSON file format."); }',
+        '                    } catch(err) { alert("JSON Parse Error: File might be corrupted or incorrectly formatted."); }',
         '                };',
         '                reader.readAsText(file);',
         '            } else if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {',
@@ -617,12 +713,18 @@ app.get('/', (req, res) => {
         '        async function sendImportPayload(type, mode, zone, items) {',
         '            const endpoint = type === "master" ? "/api/master-drugs/import" : "/api/dispense/import";',
         '            const bodyKey = type === "master" ? "drugs" : "records";',
-        '            const res = await fetch(endpoint, {',
-        '                method: "POST",',
-        '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
-        '                body: JSON.stringify({ zone, mode, [bodyKey]: items })',
-        '            });',
-        '            if (res.ok) { alert("Import completed successfully!"); } else { alert("Import failed."); }',
+        '            try {',
+        '                const res = await fetch(endpoint, {',
+        '                    method: "POST",',
+        '                    headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
+        '                    body: JSON.stringify({ zone, mode, [bodyKey]: items })',
+        '                });',
+        '                const data = await res.json();',
+        '                if (res.ok) { alert(data.message || "Import completed successfully!"); } ',
+        '                else { alert("Import failed: " + (data.error || "Unknown server error")); }',
+        '            } catch(e) {',
+        '                alert("Connection error during import: " + e.message);',
+        '            }',
         '        }',
 
         '        async function updateAdminProfile() {',

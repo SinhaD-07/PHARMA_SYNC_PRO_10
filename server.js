@@ -13,11 +13,11 @@ try {
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const SECRET_KEY = process.env.JWT_SECRET || "rxmedisync_ultra_secure_debanjan_2026_key";
+const SECRET_KEY = process.env.JWT_SECRET || "pharma_sync_ultra_secure_debanjan_2026_key";
 
 const COPYRIGHT_OWNER = "Debanjan Singha";
 console.log("================================================================");
-console.log(" RXMEDISYNC PRO | ULTRA-FAST REALTIME ENTERPRISE ENGINE");
+console.log(" PHARMA-SYNC PRO | ULTRA-FAST REALTIME ENTERPRISE ENGINE");
 console.log(" Lead System Architect & Developer: " + COPYRIGHT_OWNER);
 console.log(" Copyright (c) 2026. All Rights Reserved.");
 console.log("================================================================");
@@ -192,7 +192,7 @@ app.post('/api/users', authenticateToken, async (req, res) => {
     }
 
     const hash = await bcrypt.hash(password, 10);
-    db.run("INSERT INTO users (username, phone, password, role, zones, status) VALUES (?, ?, ?, 'USER', ?, 1)", 
+    db.run("INSERT INTO users (username, phone, password, role, zones, status) VALUES (?, ?, ?, 'OPERATOR', ?, 1)", 
         [username.trim(), phone.trim(), hash, JSON.stringify(zones)], 
         (err) => {
             if (err) return res.status(400).json({ error: "User with this name/phone already exists." });
@@ -384,7 +384,7 @@ app.get('/', (req, res) => {
         '<head>',
         '    <meta charset="UTF-8">',
         '    <meta name="viewport" content="width=device-width, initial-scale=1.0">',
-        '    <title>RxMEDISYNC PRO | ULTRA REALTIME ENGINE</title>',
+        '    <title>PHARMA-SYNC PRO | ULTRA REALTIME ENGINE</title>',
         '    <meta name="author" content="Debanjan Singha">',
         '    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>',
         '    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.23/jspdf.plugin.autotable.min.js"></script>',
@@ -442,7 +442,7 @@ app.get('/', (req, res) => {
         '    <div class="container">',
         '        <!-- LOGIN SCREEN -->',
         '        <div id="login-screen" class="panel" style="max-width: 420px; margin: 80px auto; text-align: center; padding: 35px;">',
-        '            <h1 style="color:var(--sidebar); font-size: 24px; margin-bottom: 5px;">RxMEDISYNC<span style="color:var(--accent)">PRO</span></h1>',
+        '            <h1 style="color:var(--sidebar); font-size: 24px; margin-bottom: 5px;">PHARMA<span style="color:var(--accent)">SYNC</span> PRO</h1>',
         '            <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 25px;">Real-Time Multi-User Pharmacy Engine</p>',
         '            <input type="text" id="login-username" placeholder="Username or Phone Number" onkeydown="if(event.key===\'Enter\') document.getElementById(\'login-password\').focus()">',
         '            <input type="password" id="login-password" placeholder="Password" onkeydown="if(event.key===\'Enter\') handleLogin()">',
@@ -458,7 +458,7 @@ app.get('/', (req, res) => {
         '        <div id="app-screen" class="hidden">',
         '            <div class="header-bar">',
         '                <div style="display: flex; align-items: center;">',
-        '                    <h1 style="margin:0; font-size:20px; color:var(--sidebar); display: inline-block;">RxMEDISYNC<span style="color:var(--accent)">PRO</span></h1>',
+        '                    <h1 style="margin:0; font-size:20px; color:var(--sidebar); display: inline-block;">PHARMA<span style="color:var(--accent)">SYNC</span> PRO</h1>',
         '                    <span id="role-display" class="badge" style="margin-left: 10px;">ROLE</span>',
         '                    <span style="margin-left: 15px; font-size: 12px; color: var(--text-muted);"><span class="live-dot"></span>LIVE AUTO-SYNC (2s)</span>',
         '                </div>',
@@ -1017,7 +1017,7 @@ app.get('/', (req, res) => {
         '            const { jsPDF } = window.jspdf;',
         '            const doc = new jsPDF();',
         '            doc.setFontSize(16);',
-        '            doc.text(`RXMEDISYNC DAILY REPORT - ${activeZone}`, 14, 20);',
+        '            doc.text(`PHARMA-SYNC DAILY REPORT - ${activeZone}`, 14, 20);',
         '            doc.setFontSize(10);',
         '            doc.text(`Date & Time: ${new Date().toLocaleString()} | Mandatory Remarks: ${remarks}`, 14, 28);',
 
@@ -1034,7 +1034,7 @@ app.get('/', (req, res) => {
         '                    doc.text(`Page ${data.pageNumber} of ${pageCount}`, doc.internal.pageSize.width - 30, doc.internal.pageSize.height - 10, { align: "right" });',
         '                }',
         '            });',
-        '            doc.save(`RxMediReport_${activeZone}_${Date.now()}.pdf`);',
+        '            doc.save(`PharmaReport_${activeZone}_${Date.now()}.pdf`);',
         '        }',
 
         '        function openEditModal(id, username, currentZonesStr) {',

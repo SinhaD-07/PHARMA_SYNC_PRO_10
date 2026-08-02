@@ -13,29 +13,36 @@ try {
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const SECRET_KEY = process.env.JWT_SECRET || "pharma_sync_ultra_secure_debanjan_2026_key";
+const SECRET_KEY = process.env.JWT_SECRET || "rxmedisync_ultra_secure_debanjan_2026_key";
 
 const COPYRIGHT_OWNER = "Debanjan Singha";
 console.log("================================================================");
-console.log(" PHARMA-SYNC PRO | ENTERPRISE OFFLINE-FIRST & FIREWALL ENGINE");
-console.log(" Lead System Architect: " + COPYRIGHT_OWNER);
+console.log(" RXMEDISYNC PRO | ULTRA-FAST REALTIME ENTERPRISE ENGINE");
+console.log(" Lead System Architect & Developer: " + COPYRIGHT_OWNER);
 console.log(" Copyright (c) 2026. All Rights Reserved.");
 console.log("================================================================");
 
-// Strict Security Firewall Headers (Zero Third-Party Leak Policy)
+// Strict Data Firewall & Security Headers (Zero Third-Party Data Leakage Protection)
 app.use((req, res, next) => {
-    res.setHeader("Content-Security-Policy", "default-src 'self' https://cdnjs.cloudflare.com 'unsafe-inline' 'unsafe-eval';");
-    res.setHeader("X-Frame-Options", "DENY");
-    res.setHeader("X-Content-Type-Options", "nosniff");
-    res.setHeader("Referrer-Policy", "no-referrer");
-    res.setHeader("X-XSS-Protection", "1; mode=block");
+    res.setHeader(
+        'Content-Security-Policy',
+        "default-src 'self' cdnjs.cloudflare.com; " +
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' cdnjs.cloudflare.com; " +
+        "style-src 'self' 'unsafe-inline' cdnjs.cloudflare.com; " +
+        "img-src 'self' data:; " +
+        "connect-src 'self';"
+    );
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-XSS-Protection', '1; mode=block');
+    res.setHeader('Referrer-Policy', 'no-referrer');
     next();
 });
 
 app.use(cors());
 app.use(express.json({ limit: '100mb' }));
 
-// Initialize Database with WAL Mode for High Concurrency & Performance
+// Initialize Database with WAL Mode for High Concurrency (100+ Users, 1M+ Records)
 const db = new sqlite3.Database('./pharmacy.db', (err) => {
     if (!err) {
         db.run("PRAGMA journal_mode = WAL;");
@@ -51,15 +58,16 @@ function initDb() {
         db.run("CREATE TABLE IF NOT EXISTS master_drugs (id INTEGER PRIMARY KEY AUTOINCREMENT, zone TEXT, drug_name TEXT, UNIQUE(zone, drug_name))");
         db.run("CREATE TABLE IF NOT EXISTS dispenses (id INTEGER PRIMARY KEY AUTOINCREMENT, zone TEXT, drug_name TEXT, qty INTEGER, entered_by TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)");
         db.run("CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, phone TEXT, zone TEXT, action TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)");
+        db.run("CREATE TABLE IF NOT EXISTS activity_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, phone TEXT, action TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)");
         db.run("CREATE TABLE IF NOT EXISTS zone_registry (id INTEGER PRIMARY KEY AUTOINCREMENT, zone_name TEXT UNIQUE)");
 
         // High Speed Database Indexes
         db.run("CREATE INDEX IF NOT EXISTS idx_master_zone_drug ON master_drugs(zone, drug_name)");
         db.run("CREATE INDEX IF NOT EXISTS idx_dispenses_zone ON dispenses(zone)");
-        db.run("CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_logs(timestamp)");
+        db.run("CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_logs(timestamp)");
 
-        // Automated 1-Month Activity Log Purge Rule
-        db.run("DELETE FROM audit_logs WHERE timestamp < datetime('now', '-1 month')");
+        // Automatically purge activity logs older than 1 month (30 days)
+        db.run("DELETE FROM activity_logs WHERE timestamp < datetime('now', '-30 days')");
 
         db.get("SELECT * FROM users WHERE role = 'ADMIN'", async (err, row) => {
             if (!row) {
@@ -113,23 +121,6 @@ function extractDrugNames(item) {
         .filter(s => s.length > 0);
 }
 
-// Levenshtein Distance Algorithm for Smart Fuzzy Search & Auto-Correction
-function getLevenshteinDistance(a, b) {
-    const matrix = [];
-    for (let i = 0; i <= b.length; i++) { matrix[i] = [i]; }
-    for (let j = 0; j <= a.length; j++) { matrix[0][j] = j; }
-    for (let i = 1; i <= b.length; i++) {
-        for (let j = 1; j <= a.length; j++) {
-            if (b.charAt(i - 1) === a.charAt(j - 1)) {
-                matrix[i][j] = matrix[i - 1][j - 1];
-            } else {
-                matrix[i][j] = Math.min(matrix[i - 1][j - 1] + 1, Math.min(matrix[i][j - 1] + 1, matrix[i - 1][j] + 1));
-            }
-        }
-    }
-    return matrix[b.length][a.length];
-}
-
 // ==========================================
 // BACKEND API ROUTES
 // ==========================================
@@ -147,6 +138,7 @@ app.post('/api/login', (req, res) => {
         if (!validPass) return res.status(400).json({ error: "Invalid credentials." });
 
         db.run("INSERT INTO audit_logs (username, phone, zone, action) VALUES (?, ?, ?, 'LOGIN')", [user.username, user.phone, user.zones]);
+        db.run("INSERT INTO activity_logs (username, phone, action) VALUES (?, ?, 'LOGIN')", [user.username, user.phone]);
 
         const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, SECRET_KEY, { expiresIn: '8h' });
         let userZones = [];
@@ -158,6 +150,7 @@ app.post('/api/login', (req, res) => {
 
 app.post('/api/logout', authenticateToken, (req, res) => {
     db.run("INSERT INTO audit_logs (username, phone, zone, action) VALUES (?, ?, ?, 'LOGOUT')", [req.user.username, req.user.phone, req.body.zone || "N/A"]);
+    db.run("INSERT INTO activity_logs (username, phone, action) VALUES (?, ?, 'LOGOUT')", [req.user.username, req.user.phone]);
     res.json({ message: "Logged out successfully" });
 });
 
@@ -199,7 +192,7 @@ app.post('/api/users', authenticateToken, async (req, res) => {
     }
 
     const hash = await bcrypt.hash(password, 10);
-    db.run("INSERT INTO users (username, phone, password, role, zones, status) VALUES (?, ?, ?, 'OPERATOR', ?, 1)", 
+    db.run("INSERT INTO users (username, phone, password, role, zones, status) VALUES (?, ?, ?, 'USER', ?, 1)", 
         [username.trim(), phone.trim(), hash, JSON.stringify(zones)], 
         (err) => {
             if (err) return res.status(400).json({ error: "User with this name/phone already exists." });
@@ -258,11 +251,15 @@ app.post('/api/zones', authenticateToken, (req, res) => {
 
 app.get('/api/admin/audit-logs', authenticateToken, (req, res) => {
     if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required." });
-    // Purge records older than 1 month before query retrieval
-    db.run("DELETE FROM audit_logs WHERE timestamp < datetime('now', '-1 month')", [], () => {
-        db.all("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 500", [], (err, rows) => {
-            res.json(rows);
-        });
+    db.all("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 200", [], (err, rows) => {
+        res.json(rows);
+    });
+});
+
+app.get('/api/admin/activity-logs', authenticateToken, (req, res) => {
+    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required." });
+    db.all("SELECT * FROM activity_logs ORDER BY id DESC LIMIT 500", [], (err, rows) => {
+        res.json(rows);
     });
 });
 
@@ -387,7 +384,7 @@ app.get('/', (req, res) => {
         '<head>',
         '    <meta charset="UTF-8">',
         '    <meta name="viewport" content="width=device-width, initial-scale=1.0">',
-        '    <title>PHARMA-SYNC PRO | OFFLINE-FIRST REALTIME ENGINE</title>',
+        '    <title>RxMEDISYNC PRO | ULTRA REALTIME ENGINE</title>',
         '    <meta name="author" content="Debanjan Singha">',
         '    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>',
         '    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.23/jspdf.plugin.autotable.min.js"></script>',
@@ -438,7 +435,6 @@ app.get('/', (req, res) => {
         '        .panel-credit { margin-top: 20px; padding-top: 15px; border-top: 1px dashed #e2e8f0; font-size: 11px; color: var(--text-muted); text-align: center; line-height: 1.4; }',
         '        .panel-credit b { color: var(--sidebar); }',
         '        .live-dot { height: 8px; width: 8px; background-color: var(--success); border-radius: 50%; display: inline-block; margin-right: 6px; animation: pulse 1.5s infinite; }',
-        '        .presence-bar { font-size: 11px; color: var(--accent); font-weight: 600; background: #e0e7ff; padding: 4px 10px; border-radius: 6px; margin-bottom: 10px; display: inline-block; }',
         '        @keyframes pulse { 0% { opacity: 0.4; } 50% { opacity: 1; } 100% { opacity: 0.4; } }',
         '    </style>',
         '</head>',
@@ -446,8 +442,8 @@ app.get('/', (req, res) => {
         '    <div class="container">',
         '        <!-- LOGIN SCREEN -->',
         '        <div id="login-screen" class="panel" style="max-width: 420px; margin: 80px auto; text-align: center; padding: 35px;">',
-        '            <h1 style="color:var(--sidebar); font-size: 24px; margin-bottom: 5px;">PHARMA<span style="color:var(--accent)">SYNC</span> PRO</h1>',
-        '            <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 25px;">Secure Offline-First Real-Time Pharmacy Engine</p>',
+        '            <h1 style="color:var(--sidebar); font-size: 24px; margin-bottom: 5px;">RxMEDISYNC<span style="color:var(--accent)">PRO</span></h1>',
+        '            <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 25px;">Real-Time Multi-User Pharmacy Engine</p>',
         '            <input type="text" id="login-username" placeholder="Username or Phone Number" onkeydown="if(event.key===\'Enter\') document.getElementById(\'login-password\').focus()">',
         '            <input type="password" id="login-password" placeholder="Password" onkeydown="if(event.key===\'Enter\') handleLogin()">',
         '            <button onclick="handleLogin()" class="primary-btn success" style="padding: 12px; margin-top: 10px; font-size: 15px;">AUTHENTICATE LOGIN</button>',
@@ -462,9 +458,9 @@ app.get('/', (req, res) => {
         '        <div id="app-screen" class="hidden">',
         '            <div class="header-bar">',
         '                <div style="display: flex; align-items: center;">',
-        '                    <h1 style="margin:0; font-size:20px; color:var(--sidebar); display: inline-block;">PHARMA<span style="color:var(--accent)">SYNC</span> PRO</h1>',
+        '                    <h1 style="margin:0; font-size:20px; color:var(--sidebar); display: inline-block;">RxMEDISYNC<span style="color:var(--accent)">PRO</span></h1>',
         '                    <span id="role-display" class="badge" style="margin-left: 10px;">ROLE</span>',
-        '                    <span style="margin-left: 15px; font-size: 12px; color: var(--text-muted);"><span class="live-dot" id="sync-dot"></span><span id="sync-status-text">LIVE AUTO-SYNC (2s)</span></span>',
+        '                    <span style="margin-left: 15px; font-size: 12px; color: var(--text-muted);"><span class="live-dot"></span>LIVE AUTO-SYNC (2s)</span>',
         '                </div>',
         '                <div style="display:flex; gap:10px; align-items: center;">',
         '                    <div id="user-zone-picker-wrap" style="margin-bottom:0; width: 220px; display:none;">',
@@ -520,16 +516,26 @@ app.get('/', (req, res) => {
         '                    <select id="admin-import-zone"><option value="">-- Select Target Zone --</option></select>',
         '                    <input type="file" id="admin-file-import" accept=".json, .xlsx, .xls">',
         '                    <div class="flex">',
-        '                        <button onclick="processMasterImport(\'merge\')" class="primary-btn">Import Master (Merge)</button>',
-        '                        <button onclick="processMasterImport(\'reset\')" class="primary-btn danger">Import Master (Reset & Add)</button>',
+        '                        <button onclick="processImport(\'master\', \'merge\')" class="primary-btn">Import Master (Merge)</button>',
+        '                        <button onclick="processImport(\'master\', \'reset\')" class="primary-btn danger">Import Master (Reset & Add)</button>',
         '                    </div>',
         '                </div>',
 
         '                <div class="panel">',
-        '                    <h2>📜 User Login & Logout Activity Logs (Auto-Purged after 1 Month)</h2>',
+        '                    <h2>🔐 User Login / Logout Activity Tracker (Retained 1 Month)</h2>',
         '                    <div class="table-wrap">',
         '                        <table>',
-        '                            <thead><tr><th>Timestamp</th><th>Username</th><th>Phone</th><th>Zone Context</th><th>Action Event</th></tr></thead>',
+        '                            <thead><tr><th>Timestamp</th><th>Username</th><th>Phone</th><th>Action Event</th></tr></thead>',
+        '                            <tbody id="activity-table"></tbody>',
+        '                        </table>',
+        '                    </div>',
+        '                </div>',
+
+        '                <div class="panel">',
+        '                    <h2>📜 Transaction Audit Logs</h2>',
+        '                    <div class="table-wrap">',
+        '                        <table>',
+        '                            <thead><tr><th>Timestamp</th><th>Username</th><th>Phone</th><th>Zone Context</th><th>Action</th></tr></thead>',
         '                            <tbody id="audit-table"></tbody>',
         '                        </table>',
         '                    </div>',
@@ -538,7 +544,6 @@ app.get('/', (req, res) => {
 
         '            <!-- USER SMART-FOCUS VIEW -->',
         '            <div id="user-view" class="hidden">',
-        '                <div class="presence-bar" id="presence-indicator">🟢 Live Operators Active in Zone</div>',
         '                <div class="app-grid">',
         '                    <!-- PANEL 1: MASTER DIRECTORY -->',
         '                    <div class="panel">',
@@ -556,7 +561,7 @@ app.get('/', (req, res) => {
 
         '                    <!-- PANEL 2: DISPENSE CONSOLE & CUMULATIVE TOTALS -->',
         '                    <div class="panel">',
-        '                        <h2>🛒 Dispense Console <span style="font-size:11px; color:var(--text-muted); float:right;">[Shortcut: Ctrl+K / F2]</span></h2>',
+        '                        <h2>🛒 Dispense Console</h2>',
         '                        <div style="display: grid; grid-template-columns: 1fr 120px; gap: 10px;">',
         '                            <input type="text" id="searchDrug" list="drugList" placeholder="Select / Type Drug Name..." oninput="checkDrugAutoJump(event)" onkeydown="handleDrugNameKeydown(event)">',
         '                            <input type="number" id="dispenseAmount" placeholder="Qty" onkeydown="if(event.key===\'Enter\') dispenseDrug()">',
@@ -635,26 +640,12 @@ app.get('/', (req, res) => {
         '        let dailyLog = {};',
         '        let availableZonesList = [];',
         '        let autoSyncTimer = null;',
-        '        let offlineQueue = JSON.parse(localStorage.getItem("pharma_offline_queue") || "[]");',
 
         '        // Smart Diff Caches to prevent unnecessary DOM thrashing & lagging',
         '        let lastMasterCache = "";',
         '        let lastHistoryCache = "";',
 
         '        if (token) checkSession();',
-
-        '        // Global Power-User Hotkey Listener',
-        '        window.addEventListener("keydown", (e) => {',
-        '            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {',
-        '                e.preventDefault();',
-        '                const sBox = document.getElementById("searchDrug");',
-        '                if (sBox) { sBox.focus(); sBox.select(); }',
-        '            } else if (e.key === "F2") {',
-        '                e.preventDefault();',
-        '                const sBox = document.getElementById("searchDrug");',
-        '                if (sBox) { sBox.focus(); sBox.select(); }',
-        '            }',
-        '        });',
 
         '        async function handleLogin() {',
         '            const u = document.getElementById("login-username").value;',
@@ -700,48 +691,14 @@ app.get('/', (req, res) => {
         '            }',
         '        }',
 
-        '        // Predictive Smart-Search & Auto-Correction Fuzzy Matching',
+        '        // Instant focus jump to quantity when drug name is selected',
         '        function checkDrugAutoJump(e) {',
-        '            const rawInput = e.target.value.trim().toUpperCase();',
-        '            if (!rawInput) return;',
-        '            if (masterDrugsList.includes(rawInput)) {',
-        '                const qtyInput = document.getElementById("dispenseAmount");',
-        '                qtyInput.focus();',
-        '                qtyInput.select();',
-        '                return;',
-        '            }',
-        '            // Fuzzy match check (Levenshtein distance <= 2 for typo correction)',
-        '            let bestMatch = null;',
-        '            let minDistance = 99;',
-        '            masterDrugsList.forEach(drug => {',
-        '                const dist = getLevenshteinDistance(rawInput, drug);',
-        '                if (dist < minDistance && dist <= 2 && rawInput.length >= 3) {',
-        '                    minDistance = dist;',
-        '                    bestMatch = drug;',
-        '                }',
-        '            });',
-        '            if (bestMatch) {',
-        '                e.target.value = bestMatch;',
+        '            const inputVal = e.target.value.trim().toUpperCase();',
+        '            if (masterDrugsList.includes(inputVal)) {',
         '                const qtyInput = document.getElementById("dispenseAmount");',
         '                qtyInput.focus();',
         '                qtyInput.select();',
         '            }',
-        '        }',
-
-        '        function getLevenshteinDistance(a, b) {',
-        '            const matrix = [];',
-        '            for (let i = 0; i <= b.length; i++) { matrix[i] = [i]; }',
-        '            for (let j = 0; j <= a.length; j++) { matrix[0][j] = j; }',
-        '            for (let i = 1; i <= b.length; i++) {',
-        '                for (let j = 1; j <= a.length; j++) {',
-        '                    if (b.charAt(i - 1) === a.charAt(j - 1)) {',
-        '                        matrix[i][j] = matrix[i - 1][j - 1];',
-        '                    } else {',
-        '                        matrix[i][j] = Math.min(matrix[i - 1][j - 1] + 1, Math.min(matrix[i][j - 1] + 1, matrix[i - 1][j] + 1));',
-        '                    }',
-        '                }',
-        '            }',
-        '            return matrix[b.length][a.length];',
         '        }',
 
         '        function handleDrugNameKeydown(e) {',
@@ -800,6 +757,14 @@ app.get('/', (req, res) => {
         '                        <button onclick="removeUser(${u.id})" class="action-link" style="color:var(--danger);">Remove</button>',
         '                    </td>',
         '                </tr>`;',
+        '            });',
+
+        '            const actRes = await fetch("/api/admin/activity-logs", { headers: { "Authorization": "Bearer " + token } });',
+        '            const actLogs = await actRes.json();',
+        '            const actBody = document.getElementById("activity-table");',
+        '            actBody.innerHTML = "";',
+        '            actLogs.forEach(l => {',
+        '                actBody.innerHTML += `<tr><td>${l.timestamp}</td><td>${l.username}</td><td>${l.phone}</td><td><span class="badge" style="background:${l.action===\'LOGIN\'?\'#dcfce7;color:#166534\':\'#fee2e2;color:#991b1b\'}">${l.action}</span></td></tr>`;',
         '            });',
 
         '            const auditRes = await fetch("/api/admin/audit-logs", { headers: { "Authorization": "Bearer " + token } });',
@@ -861,7 +826,7 @@ app.get('/', (req, res) => {
         '        function startAutoSync() {',
         '            syncUserData();',
         '            if (autoSyncTimer) clearInterval(autoSyncTimer);',
-        '            // Live Background Auto-Sync every 2 seconds with Offline Queue Syncing',
+        '            // Live Background Auto-Sync every 2 seconds',
         '            autoSyncTimer = setInterval(() => {',
         '                if (activeZone && !document.hidden) {',
         '                    syncUserData(true);',
@@ -871,23 +836,6 @@ app.get('/', (req, res) => {
 
         '        async function syncUserData(isSilent = false) {',
         '            try {',
-        '                // First flush any pending offline records if back online',
-        '                if (navigator.onLine && offlineQueue.length > 0) {',
-        '                    document.getElementById("sync-status-text").innerText = "SYNCING OFFLINE QUEUE...";',
-        '                    while (offlineQueue.length > 0) {',
-        '                        const payload = offlineQueue[0];',
-        '                        const sRes = await fetch(payload.endpoint, {',
-        '                            method: payload.method,',
-        '                            headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
-        '                            body: JSON.stringify(payload.body)',
-        '                        });',
-        '                        if (sRes.ok) {',
-        '                            offlineQueue.shift();',
-        '                            localStorage.setItem("pharma_offline_queue", JSON.stringify(offlineQueue));',
-        '                        } else { break; }',
-        '                    }',
-        '                }',
-
         '                const mRes = await fetch(`/api/master-drugs?zone=${activeZone}`, { headers: { "Authorization": "Bearer " + token } });',
         '                if (!mRes.ok) return handleAccessError(mRes);',
         '                const masterData = await mRes.json();',
@@ -917,19 +865,11 @@ app.get('/', (req, res) => {
         '                    });',
         '                }',
 
-        '                document.getElementById("sync-dot").style.backgroundColor = "var(--success)";',
-        '                document.getElementById("sync-status-text").innerText = "LIVE AUTO-SYNC (2s)";',
-        '                document.getElementById("presence-indicator").innerText = `🟢 Zone Active: ${activeZone} | Operators Connected & Collaborative`;',
-
+        '                // Smart update DOM only when actual data changes',
         '                if (masterChanged || historyChanged) {',
         '                    updateUI(masterChanged, historyChanged);',
         '                }',
-        '            } catch(e) {',
-        '                // Offline fallback mode',
-        '                document.getElementById("sync-dot").style.backgroundColor = "var(--danger)";',
-        '                document.getElementById("sync-status-text").innerText = "OFFLINE MODE (Local Cache Active)";',
-        '                document.getElementById("presence-indicator").innerText = `⚠️ Offline Mode - Working Locally in ${activeZone}`;',
-        '            }',
+        '            } catch(e) { console.log("Auto sync paused...", e); }',
         '        }',
 
         '        function updateUI(masterChanged = true, historyChanged = true) {',
@@ -976,17 +916,11 @@ app.get('/', (req, res) => {
         '            const i = document.getElementById("newDrugName");',
         '            const d = i.value.trim().toUpperCase();',
         '            if (!d) return;',
-        '            const payload = { endpoint: "/api/master-drugs", method: "POST", body: { zone: activeZone, drug_name: d } };',
-        '            if (navigator.onLine) {',
-        '                await fetch(payload.endpoint, {',
-        '                    method: payload.method,',
-        '                    headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
-        '                    body: JSON.stringify(payload.body)',
-        '                });',
-        '            } else {',
-        '                offlineQueue.push(payload);',
-        '                localStorage.setItem("pharma_offline_queue", JSON.stringify(offlineQueue));',
-        '            }',
+        '            await fetch("/api/master-drugs", {',
+        '                method: "POST",',
+        '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
+        '                body: JSON.stringify({ zone: activeZone, drug_name: d })',
+        '            });',
         '            i.value = "";',
         '            syncUserData();',
         '        }',
@@ -1000,19 +934,11 @@ app.get('/', (req, res) => {
         '            if (!masterDrugsList.includes(d)) return alert("Drug not found in Master Directory. Please register it first.");',
         '            if (isNaN(q) || q <= 0) return alert("Please enter a valid quantity.");',
 
-        '            const payload = { endpoint: "/api/dispense", method: "POST", body: { zone: activeZone, drug_name: d, qty: q } };',
-        '            if (navigator.onLine) {',
-        '                await fetch(payload.endpoint, {',
-        '                    method: payload.method,',
-        '                    headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
-        '                    body: JSON.stringify(payload.body)',
-        '                });',
-        '            } else {',
-        '                offlineQueue.push(payload);',
-        '                localStorage.setItem("pharma_offline_queue", JSON.stringify(offlineQueue));',
-        '                // Optimistic local update',
-        '                dailyLog[d] = (dailyLog[d] || 0) + q;',
-        '            }',
+        '            await fetch("/api/dispense", {',
+        '                method: "POST",',
+        '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
+        '                body: JSON.stringify({ zone: activeZone, drug_name: d, qty: q })',
+        '            });',
 
         '            nI.value = ""; aI.value = "";',
         '            syncUserData();',
@@ -1091,7 +1017,7 @@ app.get('/', (req, res) => {
         '            const { jsPDF } = window.jspdf;',
         '            const doc = new jsPDF();',
         '            doc.setFontSize(16);',
-        '            doc.text(`PHARMA-SYNC DAILY REPORT - ${activeZone}`, 14, 20);',
+        '            doc.text(`RXMEDISYNC DAILY REPORT - ${activeZone}`, 14, 20);',
         '            doc.setFontSize(10);',
         '            doc.text(`Date & Time: ${new Date().toLocaleString()} | Mandatory Remarks: ${remarks}`, 14, 28);',
 
@@ -1101,14 +1027,14 @@ app.get('/', (req, res) => {
         '                head: [["Drug Name", "Cumulative Total Quantity"]],',
         '                body: tableRows,',
         '                didDrawPage: function (data) {',
-        '                    // Lead developer name visible on every single page of the PDF',
         '                    const pageCount = doc.internal.getNumberOfPages();',
         '                    doc.setFontSize(8);',
         '                    doc.setTextColor(100);',
-        '                    doc.text(`Lead Developer & Architect: Debanjan Singha | Page ${data.pageNumber} of ${pageCount}`, 14, doc.internal.pageSize.height - 10);',
+        '                    doc.text("Lead Developer: Debanjan Singha", 14, doc.internal.pageSize.height - 10);',
+        '                    doc.text(`Page ${data.pageNumber} of ${pageCount}`, doc.internal.pageSize.width - 30, doc.internal.pageSize.height - 10, { align: "right" });',
         '                }',
         '            });',
-        '            doc.save(`PharmaReport_${activeZone}_${Date.now()}.pdf`);',
+        '            doc.save(`RxMediReport_${activeZone}_${Date.now()}.pdf`);',
         '        }',
 
         '        function openEditModal(id, username, currentZonesStr) {',
@@ -1183,7 +1109,7 @@ app.get('/', (req, res) => {
         '            return Array.isArray(items) ? items : [items];',
         '        }',
 
-        '        async function processMasterImport(mode) {',
+        '        async function processImport(type, mode) {',
         '            const targetZone = document.getElementById("admin-import-zone").value;',
         '            const fileInput = document.getElementById("admin-file-import");',
         '            if (!targetZone) return alert("Select a target zone for import.");',
@@ -1198,7 +1124,7 @@ app.get('/', (req, res) => {
         '                    try {',
         '                        let parsedData = JSON.parse(e.target.result);',
         '                        const normalizedArr = normalizeImportData(parsedData);',
-        '                        sendMasterImportPayload(mode, targetZone, normalizedArr);',
+        '                        sendImportPayload(type, mode, targetZone, normalizedArr);',
         '                    } catch(err) { alert("Invalid JSON file format."); }',
         '                };',
         '                reader.readAsText(file);',
@@ -1209,17 +1135,19 @@ app.get('/', (req, res) => {
         '                    const workbook = XLSX.read(data, { type: "array" });',
         '                    const sheet = workbook.Sheets[workbook.SheetNames[0]];',
         '                    const parsedRows = XLSX.utils.sheet_to_json(sheet);',
-        '                    sendMasterImportPayload(mode, targetZone, parsedRows);',
+        '                    sendImportPayload(type, mode, targetZone, parsedRows);',
         '                };',
         '                reader.readAsArrayBuffer(file);',
         '            }',
         '        }',
 
-        '        async function sendMasterImportPayload(mode, zone, items) {',
-        '            const res = await fetch("/api/master-drugs/import", {',
+        '        async function sendImportPayload(type, mode, zone, items) {',
+        '            const endpoint = "/api/master-drugs/import";',
+        '            const bodyKey = "drugs";',
+        '            const res = await fetch(endpoint, {',
         '                method: "POST",',
         '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
-        '                body: JSON.stringify({ zone, mode, drugs: items })',
+        '                body: JSON.stringify({ zone, mode, [bodyKey]: items })',
         '            });',
         '            const data = await res.json();',
         '            if (res.ok) alert(data.message || "Import success!"); else alert("Import error: " + data.error);',

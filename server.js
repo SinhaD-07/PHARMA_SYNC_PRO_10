@@ -18,26 +18,9 @@ const SECRET_KEY = process.env.JWT_SECRET || "pharma_sync_ultra_secure_debanjan_
 const COPYRIGHT_OWNER = "Debanjan Singha";
 console.log("================================================================");
 console.log(" PHARMA-SYNC PRO | ULTRA-FAST REALTIME ENTERPRISE ENGINE");
-console.log(" Lead System Architect & Developer: " + COPYRIGHT_OWNER);
+console.log(" Lead System Architect: " + COPYRIGHT_OWNER);
 console.log(" Copyright (c) 2026. All Rights Reserved.");
 console.log("================================================================");
-
-// Strict Data Firewall & Security Headers (Zero Third-Party Data Leakage Protection)
-app.use((req, res, next) => {
-    res.setHeader(
-        'Content-Security-Policy',
-        "default-src 'self' cdnjs.cloudflare.com; " +
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval' cdnjs.cloudflare.com; " +
-        "style-src 'self' 'unsafe-inline' cdnjs.cloudflare.com; " +
-        "img-src 'self' data:; " +
-        "connect-src 'self';"
-    );
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('X-XSS-Protection', '1; mode=block');
-    res.setHeader('Referrer-Policy', 'no-referrer');
-    next();
-});
 
 app.use(cors());
 app.use(express.json({ limit: '100mb' }));
@@ -58,16 +41,11 @@ function initDb() {
         db.run("CREATE TABLE IF NOT EXISTS master_drugs (id INTEGER PRIMARY KEY AUTOINCREMENT, zone TEXT, drug_name TEXT, UNIQUE(zone, drug_name))");
         db.run("CREATE TABLE IF NOT EXISTS dispenses (id INTEGER PRIMARY KEY AUTOINCREMENT, zone TEXT, drug_name TEXT, qty INTEGER, entered_by TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)");
         db.run("CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, phone TEXT, zone TEXT, action TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)");
-        db.run("CREATE TABLE IF NOT EXISTS activity_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, phone TEXT, action TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)");
         db.run("CREATE TABLE IF NOT EXISTS zone_registry (id INTEGER PRIMARY KEY AUTOINCREMENT, zone_name TEXT UNIQUE)");
 
         // High Speed Database Indexes
         db.run("CREATE INDEX IF NOT EXISTS idx_master_zone_drug ON master_drugs(zone, drug_name)");
         db.run("CREATE INDEX IF NOT EXISTS idx_dispenses_zone ON dispenses(zone)");
-        db.run("CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_logs(timestamp)");
-
-        // Automatically purge activity logs older than 1 month (30 days)
-        db.run("DELETE FROM activity_logs WHERE timestamp < datetime('now', '-30 days')");
 
         db.get("SELECT * FROM users WHERE role = 'ADMIN'", async (err, row) => {
             if (!row) {
@@ -138,7 +116,6 @@ app.post('/api/login', (req, res) => {
         if (!validPass) return res.status(400).json({ error: "Invalid credentials." });
 
         db.run("INSERT INTO audit_logs (username, phone, zone, action) VALUES (?, ?, ?, 'LOGIN')", [user.username, user.phone, user.zones]);
-        db.run("INSERT INTO activity_logs (username, phone, action) VALUES (?, ?, 'LOGIN')", [user.username, user.phone]);
 
         const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, SECRET_KEY, { expiresIn: '8h' });
         let userZones = [];
@@ -150,7 +127,6 @@ app.post('/api/login', (req, res) => {
 
 app.post('/api/logout', authenticateToken, (req, res) => {
     db.run("INSERT INTO audit_logs (username, phone, zone, action) VALUES (?, ?, ?, 'LOGOUT')", [req.user.username, req.user.phone, req.body.zone || "N/A"]);
-    db.run("INSERT INTO activity_logs (username, phone, action) VALUES (?, ?, 'LOGOUT')", [req.user.username, req.user.phone]);
     res.json({ message: "Logged out successfully" });
 });
 
@@ -252,13 +228,6 @@ app.post('/api/zones', authenticateToken, (req, res) => {
 app.get('/api/admin/audit-logs', authenticateToken, (req, res) => {
     if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required." });
     db.all("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 200", [], (err, rows) => {
-        res.json(rows);
-    });
-});
-
-app.get('/api/admin/activity-logs', authenticateToken, (req, res) => {
-    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required." });
-    db.all("SELECT * FROM activity_logs ORDER BY id DESC LIMIT 500", [], (err, rows) => {
         res.json(rows);
     });
 });
@@ -371,6 +340,41 @@ app.delete('/api/dispense/:id', authenticateToken, (req, res) => {
 
 app.delete('/api/dispense/clear/all', authenticateToken, (req, res) => {
     db.run("DELETE FROM dispenses WHERE zone = ?", [req.body.zone], () => res.json({ message: "Totals cleared for zone." }));
+});
+
+app.post('/api/dispense/import', authenticateToken, (req, res) => {
+    const mode = req.body.mode;
+    let records = req.body.records;
+    const zone = req.body.zone;
+
+    if (!zone || !records) return res.status(400).json({ error: "Invalid payload or unselected target zone." });
+    if (!Array.isArray(records)) records = [records];
+
+    db.serialize(() => {
+        db.run("BEGIN TRANSACTION");
+        if (mode === 'reset') db.run("DELETE FROM dispenses WHERE zone = ?", [zone]);
+        
+        const stmt = db.prepare("INSERT INTO dispenses (zone, drug_name, qty, entered_by) VALUES (?, ?, ?, ?)");
+        let importedCount = 0;
+
+        records.forEach(r => {
+            const parsedNames = extractDrugNames(r);
+            let dQty = 1;
+            if (typeof r === 'object' && r !== null) {
+                dQty = parseInt(r.qty || r.amount || r.Quantity || r.quantity || 1);
+            }
+            parsedNames.forEach(dName => {
+                stmt.run(zone, dName, isNaN(dQty) ? 1 : dQty, req.user.username);
+                importedCount++;
+            });
+        });
+
+        stmt.finalize();
+        db.run("COMMIT", (err) => {
+            if (err) return res.status(500).json({ error: "Failed to commit bulk totals import." });
+            res.json({ message: `Totals imported successfully. Processed ${importedCount} records.` });
+        });
+    });
 });
 
 // ==========================================
@@ -519,20 +523,14 @@ app.get('/', (req, res) => {
         '                        <button onclick="processImport(\'master\', \'merge\')" class="primary-btn">Import Master (Merge)</button>',
         '                        <button onclick="processImport(\'master\', \'reset\')" class="primary-btn danger">Import Master (Reset & Add)</button>',
         '                    </div>',
-        '                </div>',
-
-        '                <div class="panel">',
-        '                    <h2>🔐 User Login / Logout Activity Tracker (Retained 1 Month)</h2>',
-        '                    <div class="table-wrap">',
-        '                        <table>',
-        '                            <thead><tr><th>Timestamp</th><th>Username</th><th>Phone</th><th>Action Event</th></tr></thead>',
-        '                            <tbody id="activity-table"></tbody>',
-        '                        </table>',
+        '                    <div class="flex" style="margin-top: 10px;">',
+        '                        <button onclick="processImport(\'totals\', \'merge\')" class="primary-btn success">Import Totals (Merge)</button>',
+        '                        <button onclick="processImport(\'totals\', \'reset\')" class="primary-btn danger">Import Totals (Reset & Add)</button>',
         '                    </div>',
         '                </div>',
 
         '                <div class="panel">',
-        '                    <h2>📜 Transaction Audit Logs</h2>',
+        '                    <h2>📜 Audit Logs & User Activity</h2>',
         '                    <div class="table-wrap">',
         '                        <table>',
         '                            <thead><tr><th>Timestamp</th><th>Username</th><th>Phone</th><th>Zone Context</th><th>Action</th></tr></thead>',
@@ -757,14 +755,6 @@ app.get('/', (req, res) => {
         '                        <button onclick="removeUser(${u.id})" class="action-link" style="color:var(--danger);">Remove</button>',
         '                    </td>',
         '                </tr>`;',
-        '            });',
-
-        '            const actRes = await fetch("/api/admin/activity-logs", { headers: { "Authorization": "Bearer " + token } });',
-        '            const actLogs = await actRes.json();',
-        '            const actBody = document.getElementById("activity-table");',
-        '            actBody.innerHTML = "";',
-        '            actLogs.forEach(l => {',
-        '                actBody.innerHTML += `<tr><td>${l.timestamp}</td><td>${l.username}</td><td>${l.phone}</td><td><span class="badge" style="background:${l.action===\'LOGIN\'?\'#dcfce7;color:#166534\':\'#fee2e2;color:#991b1b\'}">${l.action}</span></td></tr>`;',
         '            });',
 
         '            const auditRes = await fetch("/api/admin/audit-logs", { headers: { "Authorization": "Bearer " + token } });',
@@ -1027,11 +1017,10 @@ app.get('/', (req, res) => {
         '                head: [["Drug Name", "Cumulative Total Quantity"]],',
         '                body: tableRows,',
         '                didDrawPage: function (data) {',
-        '                    const pageCount = doc.internal.getNumberOfPages();',
-        '                    doc.setFontSize(8);',
-        '                    doc.setTextColor(100);',
-        '                    doc.text("Lead Developer: Debanjan Singha", 14, doc.internal.pageSize.height - 10);',
-        '                    doc.text(`Page ${data.pageNumber} of ${pageCount}`, doc.internal.pageSize.width - 30, doc.internal.pageSize.height - 10, { align: "right" });',
+        '                    if (doc.internal.getNumberOfPages() === 1) {',
+        '                        doc.setFontSize(8);',
+        '                        doc.text("System Architect & Lead Developer: Debanjan Singha", 14, doc.internal.pageSize.height - 10);',
+        '                    }',
         '                }',
         '            });',
         '            doc.save(`PharmaReport_${activeZone}_${Date.now()}.pdf`);',
@@ -1142,8 +1131,8 @@ app.get('/', (req, res) => {
         '        }',
 
         '        async function sendImportPayload(type, mode, zone, items) {',
-        '            const endpoint = "/api/master-drugs/import";',
-        '            const bodyKey = "drugs";',
+        '            const endpoint = type === "master" ? "/api/master-drugs/import" : "/api/dispense/import";',
+        '            const bodyKey = type === "master" ? "drugs" : "records";',
         '            const res = await fetch(endpoint, {',
         '                method: "POST",',
         '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',

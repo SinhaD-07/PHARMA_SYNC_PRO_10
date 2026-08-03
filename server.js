@@ -89,7 +89,7 @@ const authenticateToken = (req, res, next) => {
         db.get("SELECT * FROM users WHERE id = ?", [decoded.id], (err, user) => {
             if (err || !user) return res.status(404).json({ error: "User profile not found." });
             if (user.status !== 1) {
-                return res.status(403).json({ error: "ACCESS_DISABLED", message: "ERROR! PLEASE CONTACT TO THE ADMIN" });
+                return res.status(403).json({ error: "ACCESS_DISABLED", message: "ERROR! PLEASE CONTACT THE ADMIN" });
             }
             req.user = user;
             next();
@@ -132,7 +132,7 @@ app.post('/api/login', (req, res) => {
 
     db.get("SELECT * FROM users WHERE username = ? OR phone = ?", [username, username], async (err, user) => {
         if (err || !user) return res.status(400).json({ error: "Invalid credentials." });
-        if (user.status !== 1) return res.status(403).json({ error: "ERROR! PLEASE CONTACT TO THE ADMIN" });
+        if (user.status !== 1) return res.status(403).json({ error: "ERROR! PLEASE CONTACT THE ADMIN" });
 
         const validPass = await bcrypt.compare(password, user.password);
         if (!validPass) return res.status(400).json({ error: "Invalid credentials." });
@@ -249,10 +249,18 @@ app.post('/api/zones', authenticateToken, (req, res) => {
     });
 });
 
+// LOG MANAGEMENT ROUTES (NEW)
 app.get('/api/admin/audit-logs', authenticateToken, (req, res) => {
     if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required." });
     db.all("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 200", [], (err, rows) => {
         res.json(rows);
+    });
+});
+
+app.delete('/api/admin/audit-logs/clear', authenticateToken, (req, res) => {
+    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required." });
+    db.run("DELETE FROM audit_logs", [], (err) => {
+        res.json({ message: "Audit logs completely cleared." });
     });
 });
 
@@ -263,6 +271,14 @@ app.get('/api/admin/activity-logs', authenticateToken, (req, res) => {
     });
 });
 
+app.delete('/api/admin/activity-logs/clear', authenticateToken, (req, res) => {
+    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required." });
+    db.run("DELETE FROM activity_logs", [], (err) => {
+        res.json({ message: "Activity logs completely cleared." });
+    });
+});
+
+// MASTER DRUGS & DISPENSE API
 app.get('/api/master-drugs', authenticateToken, (req, res) => {
     db.all("SELECT drug_name FROM master_drugs WHERE zone = ? ORDER BY drug_name ASC", [req.query.zone], (err, rows) => {
         res.json(rows.map(r => r.drug_name));
@@ -425,7 +441,7 @@ app.get('/', (req, res) => {
         '        th { background: #f8fafc; padding: 10px; text-align: left; color: var(--text-muted); position: sticky; top: 0; z-index: 10; font-size: 11px; text-transform: uppercase; }',
         '        td { padding: 10px; border-bottom: 1px solid #f8fafc; }',
         '        .badge { background: #e0e7ff; color: var(--accent); padding: 2px 8px; border-radius: 4px; font-weight: bold; }',
-        '        .action-link { cursor: pointer; font-size: 11px; font-weight: bold; text-decoration: underline; background: none; border: none; padding: 0 4px; margin: 0; width: auto; display: inline; }',
+        '        .action-link { cursor: pointer; font-size: 12px; font-weight: bold; text-decoration: underline; background: none; border: none; padding: 0 6px; margin: 0; width: auto; display: inline; }',
         '        .hidden { display: none !important; }',
         '        .flex { display: flex; gap: 10px; align-items: center; }',
         '        .zone-checkbox-group { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid #d1d9e6; }',
@@ -522,7 +538,10 @@ app.get('/', (req, res) => {
         '                </div>',
 
         '                <div class="panel">',
-        '                    <h2>🔐 User Login / Logout Activity Tracker (Retained 1 Month)</h2>',
+        '                    <div style="display:flex; justify-content:space-between; align-items:center;">',
+        '                        <h2>🔐 User Login / Logout Activity Tracker (Retained 1 Month)</h2>',
+        '                        <button onclick="clearActivityLogs()" class="primary-btn danger" style="width:auto; padding:6px 12px; font-size:11px;">CLEAR ACTIVITY LOGS</button>',
+        '                    </div>',
         '                    <div class="table-wrap">',
         '                        <table>',
         '                            <thead><tr><th>Timestamp</th><th>Username</th><th>Phone</th><th>Action Event</th></tr></thead>',
@@ -532,7 +551,10 @@ app.get('/', (req, res) => {
         '                </div>',
 
         '                <div class="panel">',
-        '                    <h2>📜 Transaction Audit Logs</h2>',
+        '                    <div style="display:flex; justify-content:space-between; align-items:center;">',
+        '                        <h2>📜 Transaction Audit Logs</h2>',
+        '                        <button onclick="clearAuditLogs()" class="primary-btn danger" style="width:auto; padding:6px 12px; font-size:11px;">CLEAR AUDIT LOGS</button>',
+        '                    </div>',
         '                    <div class="table-wrap">',
         '                        <table>',
         '                            <thead><tr><th>Timestamp</th><th>Username</th><th>Phone</th><th>Zone Context</th><th>Action</th></tr></thead>',
@@ -641,11 +663,19 @@ app.get('/', (req, res) => {
         '        let availableZonesList = [];',
         '        let autoSyncTimer = null;',
 
-        '        // Smart Diff Caches to prevent unnecessary DOM thrashing & lagging',
         '        let lastMasterCache = "";',
         '        let lastHistoryCache = "";',
 
         '        if (token) checkSession();',
+
+        '        async function handleAccessError(res) {',
+        '            if (res.status === 403 || res.status === 401) {',
+        '                alert("Session expired or access denied. Please log in again.");',
+        '                handleLogout();',
+        '                return true;',
+        '            }',
+        '            return false;',
+        '        }',
 
         '        async function handleLogin() {',
         '            const u = document.getElementById("login-username").value;',
@@ -668,7 +698,7 @@ app.get('/', (req, res) => {
 
         '        function handleLogout() {',
         '            if (autoSyncTimer) clearInterval(autoSyncTimer);',
-        '            fetch("/api/logout", { method: "POST", headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ zone: activeZone }) });',
+        '            if(token) fetch("/api/logout", { method: "POST", headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ zone: activeZone }) }).catch(()=>console.log("Logged out locally"));',
         '            localStorage.removeItem("token");',
         '            location.reload();',
         '        }',
@@ -679,19 +709,21 @@ app.get('/', (req, res) => {
         '            document.getElementById("login-screen").classList.add("hidden");',
         '            document.getElementById("app-screen").classList.remove("hidden");',
         '            ',
-        '            const payload = JSON.parse(atob(token.split(".")[1]));',
-        '            document.getElementById("role-display").innerText = payload.role;',
-
-        '            if (payload.role === "ADMIN") {',
-        '                document.getElementById("admin-view").classList.remove("hidden");',
-        '                loadAdminData();',
-        '            } else {',
-        '                document.getElementById("user-view").classList.remove("hidden");',
-        '                loadUserZones();',
+        '            try {',
+        '                const payload = JSON.parse(atob(token.split(".")[1]));',
+        '                document.getElementById("role-display").innerText = payload.role;',
+        '                if (payload.role === "ADMIN") {',
+        '                    document.getElementById("admin-view").classList.remove("hidden");',
+        '                    loadAdminData();',
+        '                } else {',
+        '                    document.getElementById("user-view").classList.remove("hidden");',
+        '                    loadUserZones();',
+        '                }',
+        '            } catch(err) {',
+        '                handleLogout();',
         '            }',
         '        }',
 
-        '        // Instant focus jump to quantity when drug name is selected',
         '        function checkDrugAutoJump(e) {',
         '            const inputVal = e.target.value.trim().toUpperCase();',
         '            if (masterDrugsList.includes(inputVal)) {',
@@ -720,6 +752,7 @@ app.get('/', (req, res) => {
         '                body: JSON.stringify({ zone_name: zInput })',
         '            });',
         '            ',
+        '            if (await handleAccessError(res)) return;',
         '            const data = await res.json();',
         '            ',
         '            if (res.ok) {',
@@ -733,6 +766,7 @@ app.get('/', (req, res) => {
 
         '        async function loadAdminData() {',
         '            const zRes = await fetch("/api/zones", { headers: { "Authorization": "Bearer " + token } });',
+        '            if (await handleAccessError(zRes)) return;',
         '            availableZonesList = await zRes.json();',
 
         '            const zoneContainer = document.getElementById("zone-checkbox-container");',
@@ -746,7 +780,6 @@ app.get('/', (req, res) => {
         '            });',
 
         '            const res = await fetch("/api/users", { headers: { "Authorization": "Bearer " + token } });',
-        '            if (!res.ok) return handleAccessError(res);',
         '            const users = await res.json();',
         '            const tbody = document.getElementById("users-table");',
         '            tbody.innerHTML = "";',
@@ -759,7 +792,7 @@ app.get('/', (req, res) => {
         '                    <td>${u.zones.join(", ")}</td>',
         '                    <td>${u.status ? "ACTIVE" : "DISABLED"}</td>',
         '                    <td>',
-        '                        <button onclick="openEditModal(${u.id}, \'${u.username}\', \'${zonesStr}\')" class="action-link" style="color:var(--accent);">Edit Zones</button>',
+        '                        <button onclick="openEditModal(${u.id}, \'${u.username}\', \'${zonesStr}\')" class="action-link" style="color:var(--accent); font-size:13px; text-decoration:none; border:1px solid var(--accent); border-radius:4px; padding:4px 8px;">Edit Zones</button>',
         '                        <button onclick="toggleUser(${u.id}, ${u.status ? 0 : 1})" class="action-link" style="color:var(--warning);">${u.status ? "Disable" : "Enable"}</button>',
         '                        <button onclick="removeUser(${u.id})" class="action-link" style="color:var(--danger);">Remove</button>',
         '                    </td>',
@@ -783,8 +816,23 @@ app.get('/', (req, res) => {
         '            });',
         '        }',
 
+        '        async function clearActivityLogs() {',
+        '            if(!confirm("Are you sure you want to completely wipe all Activity Logs?")) return;',
+        '            const res = await fetch("/api/admin/activity-logs/clear", { method: "DELETE", headers: { "Authorization": "Bearer " + token } });',
+        '            if (await handleAccessError(res)) return;',
+        '            loadAdminData();',
+        '        }',
+
+        '        async function clearAuditLogs() {',
+        '            if(!confirm("Are you sure you want to completely wipe all Transaction Audit Logs?")) return;',
+        '            const res = await fetch("/api/admin/audit-logs/clear", { method: "DELETE", headers: { "Authorization": "Bearer " + token } });',
+        '            if (await handleAccessError(res)) return;',
+        '            loadAdminData();',
+        '        }',
+
         '        async function loadUserZones() {',
         '            const zRes = await fetch("/api/zones", { headers: { "Authorization": "Bearer " + token } });',
+        '            if (await handleAccessError(zRes)) return;',
         '            assignedUserZones = await zRes.json();',
 
         '            const pickerWrap = document.getElementById("user-zone-picker-wrap");',
@@ -833,7 +881,6 @@ app.get('/', (req, res) => {
         '        function startAutoSync() {',
         '            syncUserData();',
         '            if (autoSyncTimer) clearInterval(autoSyncTimer);',
-        '            // Live Background Auto-Sync every 2 seconds',
         '            autoSyncTimer = setInterval(() => {',
         '                if (activeZone && !document.hidden) {',
         '                    syncUserData(true);',
@@ -844,7 +891,8 @@ app.get('/', (req, res) => {
         '        async function syncUserData(isSilent = false) {',
         '            try {',
         '                const mRes = await fetch(`/api/master-drugs?zone=${activeZone}`, { headers: { "Authorization": "Bearer " + token } });',
-        '                if (!mRes.ok) return handleAccessError(mRes);',
+        '                if (!isSilent && await handleAccessError(mRes)) return;',
+        '                if(mRes.status === 401 || mRes.status === 403) return handleLogout();',
         '                const masterData = await mRes.json();',
         '                const masterStr = JSON.stringify(masterData);',
 
@@ -872,7 +920,6 @@ app.get('/', (req, res) => {
         '                    });',
         '                }',
 
-        '                // Smart update DOM only when actual data changes',
         '                if (masterChanged || historyChanged) {',
         '                    updateUI(masterChanged, historyChanged);',
         '                }',
@@ -1070,21 +1117,24 @@ app.get('/', (req, res) => {
         '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
         '                body: JSON.stringify({ zones: z })',
         '            });',
+        '            if (await handleAccessError(res)) return;',
         '            if (res.ok) { closeEditModal(); loadAdminData(); } else { alert("Failed to update user zones."); }',
         '        }',
 
         '        async function toggleUser(id, status) {',
-        '            await fetch(`/api/users/${id}/status`, {',
+        '            const res = await fetch(`/api/users/${id}/status`, {',
         '                method: "PUT",',
         '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
         '                body: JSON.stringify({ status })',
         '            });',
+        '            if (await handleAccessError(res)) return;',
         '            loadAdminData();',
         '        }',
 
         '        async function removeUser(id) {',
         '            if (!confirm("Permanently remove user?")) return;',
-        '            await fetch(`/api/users/${id}`, { method: "DELETE", headers: { "Authorization": "Bearer " + token } });',
+        '            const res = await fetch(`/api/users/${id}`, { method: "DELETE", headers: { "Authorization": "Bearer " + token } });',
+        '            if (await handleAccessError(res)) return;',
         '            loadAdminData();',
         '        }',
 
@@ -1101,6 +1151,7 @@ app.get('/', (req, res) => {
         '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
         '                body: JSON.stringify({ username: u, phone: p, password: pass, zones: z })',
         '            });',
+        '            if (await handleAccessError(res)) return;',
         '            if (res.ok) { alert("User created successfully"); loadAdminData(); } else { alert("Failed to create user"); }',
         '        }',
 
@@ -1156,6 +1207,7 @@ app.get('/', (req, res) => {
         '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
         '                body: JSON.stringify({ zone, mode, [bodyKey]: items })',
         '            });',
+        '            if (await handleAccessError(res)) return;',
         '            const data = await res.json();',
         '            if (res.ok) alert(data.message || "Import success!"); else alert("Import error: " + data.error);',
         '        }',
@@ -1168,6 +1220,7 @@ app.get('/', (req, res) => {
         '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
         '                body: JSON.stringify({ newUsername: u, newPassword: p })',
         '            });',
+        '            if (await handleAccessError(res)) return;',
         '            if (res.ok) { alert("Credentials updated. Logging out..."); handleLogout(); }',
         '        }',
 
@@ -1175,13 +1228,6 @@ app.get('/', (req, res) => {
         '            const rows = document.getElementById(id).rows;',
         '            const s = val.toUpperCase();',
         '            for (let r of rows) r.style.display = r.innerText.toUpperCase().includes(s) ? "" : "none";',
-        '        }',
-
-        '        function handleAccessError(res) {',
-        '            if (res.status === 403) {',
-        '                alert("ERROR! PLEASE CONTACT TO THE ADMIN");',
-        '                handleLogout();',
-        '            }',
         '        }',
         '    </script>',
         '</body>',

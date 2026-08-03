@@ -710,7 +710,7 @@ app.get('/', (req, res) => {
         '            }',
         '        }',
 
-        '       async function registerNewZone() {',
+        '        async function registerNewZone() {',
         '            const zInput = document.getElementById("new-zone-input").value;',
         '            if (!zInput) return alert("Please enter a valid Zone Name.");',
         '            ',
@@ -725,7 +725,7 @@ app.get('/', (req, res) => {
         '            if (res.ok) {',
         '                alert(data.message || "Zone successfully registered!");',
         '                document.getElementById("new-zone-input").value = "";',
-        '                loadAdminData(); // This instantly updates the assignment checkboxes below',
+        '                loadAdminData();',
         '            } else {',
         '                alert(data.error || "Failed to register zone.");',
         '            }',

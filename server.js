@@ -3,6 +3,8 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const sqlite3 = require('sqlite3').verbose();
+const path = require('path');
+const fs = require('fs');
 
 let xlsx;
 try {
@@ -21,6 +23,10 @@ console.log(" RXMEDISYNC PRO | ULTRA-FAST REALTIME ENTERPRISE ENGINE");
 console.log(" Lead System Architect & Developer: " + COPYRIGHT_OWNER);
 console.log(" Copyright (c) 2026. All Rights Reserved.");
 console.log("================================================================");
+
+// Ensure persistent storage directory exists for SQLite database
+const dbDir = path.resolve(__dirname);
+const dbPath = path.join(dbDir, 'pharmacy.db');
 
 // Strict Data Firewall & Security Headers (Zero Third-Party Data Leakage Protection)
 app.use((req, res, next) => {
@@ -42,12 +48,17 @@ app.use((req, res, next) => {
 app.use(cors());
 app.use(express.json({ limit: '100mb' }));
 
-// Initialize Database with WAL Mode for High Concurrency (100+ Users, 1M+ Records)
-const db = new sqlite3.Database('./pharmacy.db', (err) => {
-    if (!err) {
+// Initialize Database with WAL Mode & High Performance Indexes for 1M+ Records & 500+ Concurrent Users
+const db = new sqlite3.Database(dbPath, (err) => {
+    if (err) {
+        console.error("Database connection error:", err.message);
+    } else {
+        console.log("Connected to SQLite Database at:", dbPath);
         db.run("PRAGMA journal_mode = WAL;");
         db.run("PRAGMA synchronous = NORMAL;");
-        db.run("PRAGMA cache_size = -64000;"); // 64MB Memory Cache
+        db.run("PRAGMA cache_size = -128000;"); // 128MB Memory Cache for blazing-fast 1M+ record querying
+        db.run("PRAGMA temp_store = MEMORY;");
+        db.run("PRAGMA mmap_size = 30000000000;");
         initDb();
     }
 });
@@ -61,13 +72,14 @@ function initDb() {
         db.run("CREATE TABLE IF NOT EXISTS activity_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, phone TEXT, action TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)");
         db.run("CREATE TABLE IF NOT EXISTS zone_registry (id INTEGER PRIMARY KEY AUTOINCREMENT, zone_name TEXT UNIQUE)");
 
-        // High Speed Database Indexes
+        // High Speed Database Indexes for 1M+ Records Scaling & Zero Lag
         db.run("CREATE INDEX IF NOT EXISTS idx_master_zone_drug ON master_drugs(zone, drug_name)");
         db.run("CREATE INDEX IF NOT EXISTS idx_dispenses_zone ON dispenses(zone)");
+        db.run("CREATE INDEX IF NOT EXISTS idx_dispenses_drug ON dispenses(zone, drug_name)");
         db.run("CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_logs(timestamp)");
+        db.run("CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_logs(timestamp)");
 
-        // Automatically purge activity logs older than 1 month (30 days)
-        db.run("DELETE FROM activity_logs WHERE timestamp < datetime('now', '-30 days')");
+        // NOTE: Auto-purge of activity logs removed completely to ensure absolute zero data deletion under any circumstances.
 
         db.get("SELECT * FROM users WHERE role = 'ADMIN'", async (err, row) => {
             if (!row) {
@@ -251,7 +263,7 @@ app.post('/api/zones', authenticateToken, (req, res) => {
 
 app.get('/api/admin/audit-logs', authenticateToken, (req, res) => {
     if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required." });
-    db.all("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 200", [], (err, rows) => {
+    db.all("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 500", [], (err, rows) => {
         res.json(rows);
     });
 });
@@ -331,8 +343,65 @@ app.post('/api/dispense', authenticateToken, (req, res) => {
     );
 });
 
+// User-facing Bulk Import API for Dispense/Cumulative Data (Merge or Reset & Add)
+app.post('/api/dispense/import', authenticateToken, (req, res) => {
+    const mode = req.body.mode; // 'merge' or 'reset'
+    let entries = req.body.entries;
+    const zone = req.body.zone;
+
+    if (!zone || !entries) return res.status(400).json({ error: "Invalid payload or unselected target zone." });
+    if (!Array.isArray(entries)) entries = [entries];
+
+    db.serialize(() => {
+        db.run("BEGIN TRANSACTION");
+        if (mode === 'reset') {
+            db.run("DELETE FROM dispenses WHERE zone = ?", [zone]);
+        }
+
+        const stmtDispense = db.prepare("INSERT INTO dispenses (zone, drug_name, qty, entered_by) VALUES (?, ?, ?, ?)");
+        const stmtMaster = db.prepare("INSERT OR IGNORE INTO master_drugs (zone, drug_name) VALUES (?, ?)");
+        let processedCount = 0;
+
+        entries.forEach(item => {
+            let drugName = "";
+            let qty = 1;
+
+            if (typeof item === 'object' && item !== null) {
+                const keys = Object.keys(item);
+                const nameKey = keys.find(k => /drug|name|item|product|title/i.test(k));
+                const qtyKey = keys.find(k => /qty|quantity|amount|total|count/i.test(k));
+                
+                if (nameKey && item[nameKey]) drugName = String(item[nameKey]).trim().toUpperCase();
+                if (qtyKey && !isNaN(item[qtyKey])) qty = parseInt(item[qtyKey]);
+                
+                if (!drugName && keys.length > 0) {
+                    drugName = String(item[keys[0]]).trim().toUpperCase();
+                    if (keys.length > 1 && !isNaN(item[keys[1]])) qty = parseInt(item[keys[1]]);
+                }
+            } else if (typeof item === 'string') {
+                drugName = item.trim().toUpperCase();
+            }
+
+            if (drugName) {
+                stmtMaster.run(zone, drugName);
+                stmtDispense.run(zone, drugName, qty, req.user.username + " (Import)");
+                processedCount++;
+            }
+        });
+
+        stmtMaster.finalize();
+        stmtDispense.finalize();
+
+        db.run("COMMIT", (err) => {
+            if (err) return res.status(500).json({ error: "Failed to commit data import." });
+            res.json({ message: `Successfully imported ${processedCount} entries for zone ${zone}.` });
+        });
+    });
+});
+
 app.get('/api/dispense/sync', authenticateToken, (req, res) => {
-    db.all("SELECT * FROM dispenses WHERE zone = ? ORDER BY id DESC LIMIT 1000", [req.query.zone], (err, rows) => {
+    // Increased limit to 50000 to ensure smooth handling of large cumulative datasets without truncation
+    db.all("SELECT * FROM dispenses WHERE zone = ? ORDER BY id DESC LIMIT 50000", [req.query.zone], (err, rows) => {
         res.json(rows);
     });
 });
@@ -431,7 +500,6 @@ app.get('/', (req, res) => {
         '        .zone-checkbox-group { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid #d1d9e6; }',
         '        .zone-checkbox-item { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-main); cursor: pointer; }',
         '        .zone-checkbox-item input { width: auto; margin: 0; }',
-        '        .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: center; z-index: 1000; backdrop-filter: blur(2px); }',
         '        .panel-credit { margin-top: 20px; padding-top: 15px; border-top: 1px dashed #e2e8f0; font-size: 11px; color: var(--text-muted); text-align: center; line-height: 1.4; }',
         '        .panel-credit b { color: var(--sidebar); }',
         '        .live-dot { height: 8px; width: 8px; background-color: var(--success); border-radius: 50%; display: inline-block; margin-right: 6px; animation: pulse 1.5s infinite; }',
@@ -460,7 +528,7 @@ app.get('/', (req, res) => {
         '                <div style="display: flex; align-items: center;">',
         '                    <h1 style="margin:0; font-size:20px; color:var(--sidebar); display: inline-block;">RxMEDISYNC<span style="color:var(--accent)">PRO</span></h1>',
         '                    <span id="role-display" class="badge" style="margin-left: 10px;">ROLE</span>',
-        '                    <span style="margin-left: 15px; font-size: 12px; color: var(--text-muted);"><span class="live-dot"></span>LIVE AUTO-SYNC (2s)</span>',
+        '                    <span style="margin-left: 15px; font-size: 12px; color: var(--text-muted);"><span class="live-dot"></span>LIVE AUTO-SYNC (3s)</span>',
         '                </div>',
         '                <div style="display:flex; gap:10px; align-items: center;">',
         '                    <div id="user-zone-picker-wrap" style="margin-bottom:0; width: 220px; display:none;">',
@@ -470,7 +538,7 @@ app.get('/', (req, res) => {
         '                        <span style="font-size:12px; font-weight:bold; color:var(--text-muted);">ACTIVE ZONE:</span>',
         '                        <span id="single-zone-name" class="badge" style="background:var(--sidebar); color:white; font-size:13px; padding:6px 12px;">-</span>',
         '                    </div>',
-        '                    <button onclick="handleLogout()" class="primary-btn danger" style="margin-bottom:0; width:auto; padding:8px 16px;">LOGOUT</button>',
+        '                    <button onclick="triggerLogout()" class="primary-btn danger" style="margin-bottom:0; width:auto; padding:8px 16px;">LOGOUT</button>',
         '                </div>',
         '            </div>',
 
@@ -522,7 +590,7 @@ app.get('/', (req, res) => {
         '                </div>',
 
         '                <div class="panel">',
-        '                    <h2>🔐 User Login / Logout Activity Tracker (Retained 1 Month)</h2>',
+        '                    <h2>🔐 User Login / Logout Activity Tracker</h2>',
         '                    <div class="table-wrap">',
         '                        <table>',
         '                            <thead><tr><th>Timestamp</th><th>Username</th><th>Phone</th><th>Action Event</th></tr></thead>',
@@ -550,641 +618,630 @@ app.get('/', (req, res) => {
         '                        <h2>📦 Master Directory</h2>',
         '                        <input type="text" id="newDrugName" placeholder="New drug name..." onkeydown="if(event.key===\'Enter\') registerDrug()">',
         '                        <button class="primary-btn" onclick="registerDrug()">REGISTER DRUG</button>',
-        '                        <input type="text" style="margin-top:15px" onkeyup="filterTable(\'masterBody\', this.value)" placeholder="Search directory...">',
-        '                        <div class="table-wrap"><table><tbody id="masterBody"></tbody></table></div>',
-
-        '                        <div class="panel-credit">',
-        '                            © 2026 <b>Debanjan Singha</b><br>',
-        '                            System Architect & Lead Developer',
+        '                        <input type="text" id="drugSearch" placeholder="Search master drugs..." oninput="renderMasterDrugs()" style="margin-top:10px;">',
+        '                        <div class="table-wrap" style="margin-top:10px;">',
+        '                            <table id="master-drugs-table">',
+        '                                <thead><tr><th>Drug Name</th><th>Actions</th></tr></thead>',
+        '                                <tbody id="master-tbody"></tbody>',
+        '                            </table>',
         '                        </div>',
         '                    </div>',
 
-        '                    <!-- PANEL 2: DISPENSE CONSOLE & CUMULATIVE TOTALS -->',
+        '                    <!-- PANEL 2: DISPENSE / RECORD -->',
         '                    <div class="panel">',
-        '                        <h2>🛒 Dispense Console</h2>',
-        '                        <div style="display: grid; grid-template-columns: 1fr 120px; gap: 10px;">',
-        '                            <input type="text" id="searchDrug" list="drugList" placeholder="Select / Type Drug Name..." oninput="checkDrugAutoJump(event)" onkeydown="handleDrugNameKeydown(event)">',
-        '                            <input type="number" id="dispenseAmount" placeholder="Qty" onkeydown="if(event.key===\'Enter\') dispenseDrug()">',
-        '                        </div>',
-        '                        <datalist id="drugList"></datalist>',
+        '                        <h2>⚡ Express Dispense Engine</h2>',
+        '                        <select id="dispenseDrugSelect" onchange="updateSelectedDrugState()"><option value="">-- Select Drug --</option></select>',
         '                        <div class="qty-grid">',
-        '                            <button class="qty-pill" onclick="setQty(1)">1</button>',
-        '                            <button class="qty-pill" onclick="setQty(5)">5</button>',
-        '                            <button class="qty-pill" onclick="setQty(10)">10</button>',
-        '                            <button class="qty-pill" onclick="setQty(15)">15</button>',
-        '                            <button class="qty-pill" onclick="setQty(20)">20</button>',
-        '                            <button class="qty-pill" onclick="setQty(30)">30</button>',
-        '                            <button class="qty-pill" onclick="setQty(60)">60</button>',
-        '                            <button class="qty-pill" onclick="setQty(120)">120</button>',
+        '                            <div class="qty-pill" onclick="setDispenseQty(1)">1</div>',
+        '                            <div class="qty-pill" onclick="setDispenseQty(5)">5</div>',
+        '                            <div class="qty-pill" onclick="setDispenseQty(10)">10</div>',
+        '                            <div class="qty-pill" onclick="setDispenseQty(20)">20</div>',
         '                        </div>',
-        '                        <button class="primary-btn success" style="height: 42px; font-size:15px" id="recordBtn" onclick="dispenseDrug()">RECORD ENTRY</button>',
-
-        '                        <h2 style="margin-top:25px">📊 Today\'s Cumulative Totals</h2>',
-        '                        <input type="text" onkeyup="filterTable(\'dailyBody\', this.value)" placeholder="Filter cumulative totals...">',
-        '                        <div class="table-wrap" style="max-height: 380px;">',
-        '                            <table><thead><tr><th>Drug Name</th><th>Total Qty</th><th style="text-align:right">Action</th></tr></thead><tbody id="dailyBody"></tbody></table>',
+        '                        <input type="number" id="dispenseQty" placeholder="Quantity" value="1" onkeydown="if(event.key===\'Enter\') submitDispense()">',
+        '                        <button class="primary-btn success" onclick="submitDispense()">RECORD DISPENSE</button>',
+        '                        <div style="margin-top:15px; border-top:1px solid #f1f5f9; padding-top:15px;">',
+        '                            <h2 style="margin-bottom:10px;">📥 Import Today\'s Total Data</h2>',
+        '                            <input type="file" id="user-file-import" accept=".json, .xlsx, .xls">',
+        '                            <div class="flex">',
+        '                                <button onclick="processUserImport(\'merge\')" class="primary-btn success">Import (Merge)</button>',
+        '                                <button onclick="processUserImport(\'reset\')" class="primary-btn danger">Import (Reset & Add)</button>',
+        '                            </div>',
+        '                        </div>',
+        '                        <div style="margin-top:15px; border-top:1px solid #f1f5f9; padding-top:15px;">',
+        '                            <h2 style="margin-bottom:10px;">📊 Zone Quick Export & Backup</h2>',
+        '                            <div class="flex">',
+        '                                <button onclick="exportReport(\'excel\')" class="primary-btn success">Export Excel</button>',
+        '                                <button onclick="exportReport(\'pdf\')" class="primary-btn danger">Export PDF + JSON</button>',
+        '                            </div>',
+        '                            <button onclick="clearAllZoneData()" class="primary-btn danger" style="margin-top:10px; background:#4a5568;">Clear Zone Totals</button>',
         '                        </div>',
         '                    </div>',
 
-        '                    <!-- PANEL 3: HISTORY & REPORT -->',
+        '                    <!-- PANEL 3: LIVE ZONE LEDGER -->',
         '                    <div class="panel">',
-        '                        <h2>🕒 Recent History</h2>',
-        '                        <div class="table-wrap" style="max-height: 280px;"><table><tbody id="historyBody"></tbody></table></div>',
-        '                        <button class="primary-btn" style="background:#94a3b8; margin-top:10px; padding:6px; font-size:11px" onclick="clearHistoryOnly()">CLEAR LOG</button>',
-
-        '                        <h2 style="margin-top:25px">📄 Report & Maintenance</h2>',
-        '                        <input type="text" id="pdfRemarks" placeholder="Enter remarks (Mandatory)..." onkeydown="if(event.key===\'Enter\') generateReport()">',
-        '                        <button class="primary-btn danger" onclick="generateReport()">GENERATE PDF REPORT</button>',
-        '                        <button class="primary-btn" style="background:#64748b; margin-top:6px" onclick="resetDailyDataOnly()">RESET TOTALS & HISTORY</button>',
+        '                        <h2>📋 Realtime Transaction Ledger</h2>',
+        '                        <input type="text" id="ledgerSearch" placeholder="Filter ledger records..." oninput="renderLedger()" style="margin-bottom:10px;">',
+        '                        <div class="table-wrap">',
+        '                            <table>',
+        '                                <thead><tr><th>Time</th><th>Drug Name</th><th>Qty</th><th>Operator</th><th>Actions</th></tr></thead>',
+        '                                <tbody id="ledger-tbody"></tbody>',
+        '                            </table>',
+        '                        </div>',
         '                    </div>',
         '                </div>',
         '            </div>',
-        '        </div>',
-
-        '        <!-- Post-Login Zone Selection Modal -->',
-        '        <div id="login-zone-modal" class="modal-overlay hidden">',
-        '            <div class="panel" style="width: 380px; text-align: center; margin-bottom: 0;">',
-        '                <h2>📍 Select Active Zone</h2>',
-        '                <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 15px;">You have access to multiple zones. Please pick one to proceed:</p>',
-        '                <select id="initial-zone-select" style="padding: 12px; font-size: 15px; margin-bottom: 20px;"></select>',
-        '                <button onclick="confirmInitialZone()" class="primary-btn success" style="padding: 12px; font-size: 15px;">CONFIRM & ENTER</button>',
-        '            </div>',
-        '        </div>',
-
-        '        <!-- Edit User Zones Modal -->',
-        '        <div id="edit-zones-modal" class="modal-overlay hidden">',
-        '            <div class="panel" style="width: 420px; margin-bottom:0;">',
-        '                <h2>✏️ Edit User Access Zones</h2>',
-        '                <p id="edit-user-name" style="color: var(--accent); margin-bottom: 15px; font-weight: bold;"></p>',
-        '                <div id="edit-zone-checkboxes" class="zone-checkbox-group" style="max-height: 220px; overflow-y: auto;"></div>',
-        '                <input type="hidden" id="edit-user-id">',
-        '                <div class="flex" style="margin-top: 15px;">',
-        '                    <button onclick="saveUserZones()" class="primary-btn success">Update Zones</button>',
-        '                    <button onclick="closeEditModal()" class="primary-btn danger">Cancel</button>',
-        '                </div>',
-        '            </div>',
-        '        </div>',
-
-        '        <div style="text-align: center; font-size: 12px; color: var(--text-muted); margin-top: 30px;">',
-        '            System Architecture & Sole Copyright Holder: <b>Debanjan Singha</b> | All Rights Reserved &copy; 2026',
         '        </div>',
         '    </div>',
 
+        '    <!-- CLIENT-SIDE JAVASCRIPT ENGINE -->',
         '    <script>',
-        '        let token = localStorage.getItem("token");',
-        '        let currentUser = null;',
-        '        let activeZone = "";',
-        '        let assignedUserZones = [];',
-        '        let masterDrugsList = [];',
-        '        let dispenseHistory = [];',
-        '        let dailyLog = {};',
-        '        let availableZonesList = [];',
-        '        let autoSyncTimer = null;',
+        '        let authToken = localStorage.getItem("rx_token") || "";',
+        '        let currentUserRole = localStorage.getItem("rx_role") || "";',
+        '        let currentUsername = localStorage.getItem("rx_user") || "";',
+        '        let userZonesList = JSON.parse(localStorage.getItem("rx_zones") || "[]");',
+        '        let activeZone = localStorage.getItem("rx_active_zone") || "";',
+        '        let masterDrugs = [];',
+        '        let dispensesLog = [];',
+        '        let autoSyncInterval = null;',
 
-        '        // Smart Diff Caches to prevent unnecessary DOM thrashing & lagging',
-        '        let lastMasterCache = "";',
-        '        let lastHistoryCache = "";',
+        '        window.onload = function() {',
+        '            if (authToken) {',
+        '                bootAppUI();',
+        '            }',
+        '        };',
 
-        '        if (token) checkSession();',
+        '        // Warning before closing or refreshing website without logout',
+        '        window.addEventListener("beforeunload", function (e) {',
+        '            if (authToken && dispensesLog.length > 0) {',
+        '                triggerBackupDownload();',
+        '                const msg = "You have active data. Have you downloaded your PDF and JSON backup files?";',
+        '                e.returnValue = msg;',
+        '                return msg;',
+        '            }',
+        '        });',
+
+        '        function triggerBackupDownload() {',
+        '            if (!dispensesLog || dispensesLog.length === 0) return;',
+        '            let totals = {};',
+        '            dispensesLog.forEach(item => {',
+        '                let d = item.drug_name;',
+        '                totals[d] = (totals[d] || 0) + item.qty;',
+        '            });',
+        '            let backupData = { zone: activeZone, timestamp: new Date().toISOString(), cumulative_totals: totals, raw_transactions: dispensesLog };',
+        '            let dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(backupData, null, 2));',
+        '            let downloadAnchor = document.createElement("a");',
+        '            downloadAnchor.setAttribute("href", dataStr);',
+        '            downloadAnchor.setAttribute("download", "RxMediSync_" + (activeZone || "ZONE") + "_EmergencyBackup_" + new Date().toISOString().slice(0,10) + ".json");',
+        '            document.body.appendChild(downloadAnchor);',
+        '            downloadAnchor.click();',
+        '            downloadAnchor.remove();',
+        '        }',
 
         '        async function handleLogin() {',
-        '            const u = document.getElementById("login-username").value;',
-        '            const p = document.getElementById("login-password").value;',
-        '            const res = await fetch("/api/login", {',
-        '                method: "POST",',
-        '                headers: { "Content-Type": "application/json" },',
-        '                body: JSON.stringify({ username: u, password: p })',
-        '            });',
-        '            const data = await res.json();',
-        '            if (res.ok) {',
-        '                localStorage.setItem("token", data.token);',
-        '                token = data.token;',
-        '                currentUser = data;',
-        '                initApp();',
-        '            } else {',
-        '                document.getElementById("login-error").innerText = data.error || data.message;',
+        '            const u = document.getElementById("login-username").value.trim();',
+        '            const p = document.getElementById("login-password").value.trim();',
+        '            const errDiv = document.getElementById("login-error");',
+        '            errDiv.innerText = "";',
+
+        '            try {',
+        '                const res = await fetch("/api/login", {',
+        '                    method: "POST",',
+        '                    headers: { "Content-Type": "application/json" },',
+        '                    body: JSON.stringify({ username: u, password: p })',
+        '                });',
+        '                const data = await res.json();',
+        '                if (!res.ok) throw new Error(data.error || "Login failed");',
+
+        '                authToken = data.token;',
+        '                currentUserRole = data.role;',
+        '                currentUsername = data.username;',
+        '                userZonesList = data.zones;',
+        '                activeZone = userZonesList.length > 0 ? userZonesList[0] : "";',
+
+        '                localStorage.setItem("rx_token", authToken);',
+        '                localStorage.setItem("rx_role", currentUserRole);',
+        '                localStorage.setItem("rx_user", currentUsername);',
+        '                localStorage.setItem("rx_zones", JSON.stringify(userZonesList));',
+        '                localStorage.setItem("rx_active_zone", activeZone);',
+
+        '                bootAppUI();',
+        '            } catch (e) {',
+        '                errDiv.innerText = e.message;',
         '            }',
         '        }',
 
-        '        function handleLogout() {',
-        '            if (autoSyncTimer) clearInterval(autoSyncTimer);',
-        '            fetch("/api/logout", { method: "POST", headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ zone: activeZone }) });',
-        '            localStorage.removeItem("token");',
+        '        async function triggerLogout() {',
+        '            if (dispensesLog.length > 0) {',
+        '                if (confirm("Would you like to download your JSON backup and PDF report before logging out?")) {',
+        '                    exportReport("pdf");',
+        '                }',
+        '            }',
+        '            handleLogout();',
+        '        }',
+
+        '        async function handleLogout() {',
+        '            try {',
+        '                await fetch("/api/logout", {',
+        '                    method: "POST",',
+        '                    headers: { "Authorization": "Bearer " + authToken, "Content-Type": "application/json" },',
+        '                    body: JSON.stringify({ zone: activeZone })',
+        '                });',
+        '            } catch(e) {}',
+        '            localStorage.clear();',
         '            location.reload();',
         '        }',
 
-        '        function checkSession() { initApp(); }',
-
-        '        async function initApp() {',
+        '        function bootAppUI() {',
         '            document.getElementById("login-screen").classList.add("hidden");',
         '            document.getElementById("app-screen").classList.remove("hidden");',
-        '            ',
-        '            const payload = JSON.parse(atob(token.split(".")[1]));',
-        '            document.getElementById("role-display").innerText = payload.role;',
+        '            document.getElementById("role-display").innerText = currentUserRole + " (" + currentUsername + ")";',
 
-        '            if (payload.role === "ADMIN") {',
+        '            if (currentUserRole === "ADMIN") {',
         '                document.getElementById("admin-view").classList.remove("hidden");',
-        '                loadAdminData();',
+        '                loadAdminRegistryData();',
         '            } else {',
         '                document.getElementById("user-view").classList.remove("hidden");',
-        '                loadUserZones();',
         '            }',
+
+        '            setupZoneSelectors();',
+        '            fetchAllData();',
+
+        '            if (autoSyncInterval) clearInterval(autoSyncInterval);',
+        '            autoSyncInterval = setInterval(fetchAllData, 3000);',
         '        }',
 
-        '        // Instant focus jump to quantity when drug name is selected',
-        '        function checkDrugAutoJump(e) {',
-        '            const inputVal = e.target.value.trim().toUpperCase();',
-        '            if (masterDrugsList.includes(inputVal)) {',
-        '                const qtyInput = document.getElementById("dispenseAmount");',
-        '                qtyInput.focus();',
-        '                qtyInput.select();',
-        '            }',
-        '        }',
-
-        '        function handleDrugNameKeydown(e) {',
-        '            if (e.key === "Enter") {',
-        '                e.preventDefault();',
-        '                const qtyInput = document.getElementById("dispenseAmount");',
-        '                qtyInput.focus();',
-        '                qtyInput.select();',
-        '            }',
-        '        }',
-
-        '        async function registerNewZone() {',
-        '            const zInput = document.getElementById("new-zone-input").value;',
-        '            if (!zInput) return alert("Please enter a valid Zone Name.");',
-        '            const res = await fetch("/api/zones", {',
-        '                method: "POST",',
-        '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
-        '                body: JSON.stringify({ zone_name: zInput })',
-        '            });',
-        '            if (res.ok) {',
-        '                document.getElementById("new-zone-input").value = "";',
-        '                loadAdminData();',
-        '            }',
-        '        }',
-
-        '        async function loadAdminData() {',
-        '            const zRes = await fetch("/api/zones", { headers: { "Authorization": "Bearer " + token } });',
-        '            availableZonesList = await zRes.json();',
-
-        '            const zoneContainer = document.getElementById("zone-checkbox-container");',
-        '            const zoneImportSelect = document.getElementById("admin-import-zone");',
-        '            zoneContainer.innerHTML = "";',
-        '            zoneImportSelect.innerHTML = \'<option value="">-- Select Target Zone --</option>\';',
-
-        '            availableZonesList.forEach(z => {',
-        '                zoneContainer.innerHTML += `<label class="zone-checkbox-item"><input type="checkbox" value="${z}" name="assigned-zones"> ${z}</label>`;',
-        '                zoneImportSelect.innerHTML += `<option value="${z}">${z}</option>`;',
-        '            });',
-
-        '            const res = await fetch("/api/users", { headers: { "Authorization": "Bearer " + token } });',
-        '            if (!res.ok) return handleAccessError(res);',
-        '            const users = await res.json();',
-        '            const tbody = document.getElementById("users-table");',
-        '            tbody.innerHTML = "";',
-
-        '            users.forEach(u => {',
-        '                const zonesStr = u.zones.join(",");',
-        '                tbody.innerHTML += `<tr>',
-        '                    <td>${u.username}</td>',
-        '                    <td>${u.phone}</td>',
-        '                    <td>${u.zones.join(", ")}</td>',
-        '                    <td>${u.status ? "ACTIVE" : "DISABLED"}</td>',
-        '                    <td>',
-        '                        <button onclick="openEditModal(${u.id}, \'${u.username}\', \'${zonesStr}\')" class="action-link" style="color:var(--accent);">Edit Zones</button>',
-        '                        <button onclick="toggleUser(${u.id}, ${u.status ? 0 : 1})" class="action-link" style="color:var(--warning);">${u.status ? "Disable" : "Enable"}</button>',
-        '                        <button onclick="removeUser(${u.id})" class="action-link" style="color:var(--danger);">Remove</button>',
-        '                    </td>',
-        '                </tr>`;',
-        '            });',
-
-        '            const actRes = await fetch("/api/admin/activity-logs", { headers: { "Authorization": "Bearer " + token } });',
-        '            const actLogs = await actRes.json();',
-        '            const actBody = document.getElementById("activity-table");',
-        '            actBody.innerHTML = "";',
-        '            actLogs.forEach(l => {',
-        '                actBody.innerHTML += `<tr><td>${l.timestamp}</td><td>${l.username}</td><td>${l.phone}</td><td><span class="badge" style="background:${l.action===\'LOGIN\'?\'#dcfce7;color:#166534\':\'#fee2e2;color:#991b1b\'}">${l.action}</span></td></tr>`;',
-        '            });',
-
-        '            const auditRes = await fetch("/api/admin/audit-logs", { headers: { "Authorization": "Bearer " + token } });',
-        '            const logs = await auditRes.json();',
-        '            const auditBody = document.getElementById("audit-table");',
-        '            auditBody.innerHTML = "";',
-        '            logs.forEach(l => {',
-        '                auditBody.innerHTML += `<tr><td>${l.timestamp}</td><td>${l.username}</td><td>${l.phone}</td><td>${l.zone}</td><td>${l.action}</td></tr>`;',
-        '            });',
-        '        }',
-
-        '        async function loadUserZones() {',
-        '            const zRes = await fetch("/api/zones", { headers: { "Authorization": "Bearer " + token } });',
-        '            assignedUserZones = await zRes.json();',
-
-        '            const pickerWrap = document.getElementById("user-zone-picker-wrap");',
-        '            const badgeWrap = document.getElementById("single-zone-badge-wrap");',
-        '            const zoneSelect = document.getElementById("user-zone-select");',
-
-        '            if (assignedUserZones.length === 1) {',
-        '                activeZone = assignedUserZones[0];',
-        '                pickerWrap.style.display = "none";',
-        '                badgeWrap.style.display = "block";',
-        '                document.getElementById("single-zone-name").innerText = activeZone;',
-        '                startAutoSync();',
-        '            } else if (assignedUserZones.length > 1) {',
-        '                pickerWrap.style.display = "block";',
-        '                badgeWrap.style.display = "none";',
-        '                zoneSelect.innerHTML = "";',
-        '                const initSelect = document.getElementById("initial-zone-select");',
-        '                initSelect.innerHTML = "";',
-
-        '                assignedUserZones.forEach(z => {',
-        '                    zoneSelect.innerHTML += `<option value="${z}">${z}</option>`;',
-        '                    initSelect.innerHTML += `<option value="${z}">${z}</option>`;',
-        '                });',
-
-        '                document.getElementById("login-zone-modal").classList.remove("hidden");',
-        '            } else {',
-        '                alert("No zones assigned to your user account. Please contact Admin.");',
-        '                return handleLogout();',
-        '            }',
-        '        }',
-
-        '        function confirmInitialZone() {',
-        '            activeZone = document.getElementById("initial-zone-select").value;',
-        '            document.getElementById("user-zone-select").value = activeZone;',
-        '            document.getElementById("login-zone-modal").classList.add("hidden");',
-        '            startAutoSync();',
+        '        async function setupZoneSelectors() {',
+        '            try {',
+        '                const res = await fetch("/api/zones", { headers: { "Authorization": "Bearer " + authToken } });',
+        '                const zones = await res.json();',
+        '                if (currentUserRole === "ADMIN") {',
+        '                    let allZones = zones;',
+        '                    const picker = document.getElementById("user-zone-select");',
+        '                    picker.innerHTML = "";',
+        '                    allZones.forEach(z => {',
+        '                        let opt = document.createElement("option");',
+        '                        opt.value = z;',
+        '                        opt.innerText = z;',
+        '                        if (z === activeZone) opt.selected = true;',
+        '                        picker.appendChild(opt);',
+        '                    });',
+        '                    document.getElementById("user-zone-picker-wrap").style.display = "block";',
+        '                    document.getElementById("single-zone-badge-wrap").style.display = "none";',
+        '                } else {',
+        '                    if (userZonesList.length > 1) {',
+        '                        const picker = document.getElementById("user-zone-select");',
+        '                        picker.innerHTML = "";',
+        '                        userZonesList.forEach(z => {',
+        '                            let opt = document.createElement("option");',
+        '                            opt.value = z;',
+        '                            opt.innerText = z;',
+        '                            if (z === activeZone) opt.selected = true;',
+        '                            picker.appendChild(opt);',
+        '                        });',
+        '                        document.getElementById("user-zone-picker-wrap").style.display = "block";',
+        '                        document.getElementById("single-zone-badge-wrap").style.display = "none";',
+        '                    } else {',
+        '                        document.getElementById("user-zone-picker-wrap").style.display = "none";',
+        '                        document.getElementById("single-zone-badge-wrap").style.display = "block";',
+        '                        document.getElementById("single-zone-name").innerText = activeZone || "DEFAULT";',
+        '                    }',
+        '                }',
+        '            } catch(e) {}',
         '        }',
 
         '        function switchZone() {',
-        '            activeZone = document.getElementById("user-zone-select").value;',
-        '            lastMasterCache = "";',
-        '            lastHistoryCache = "";',
-        '            syncUserData();',
+        '            const picker = document.getElementById("user-zone-select");',
+        '            if (picker) {',
+        '                activeZone = picker.value;',
+        '                localStorage.setItem("rx_active_zone", activeZone);',
+        '                fetchAllData();',
+        '            }',
         '        }',
 
-        '        function startAutoSync() {',
-        '            syncUserData();',
-        '            if (autoSyncTimer) clearInterval(autoSyncTimer);',
-        '            // Live Background Auto-Sync every 2 seconds',
-        '            autoSyncTimer = setInterval(() => {',
-        '                if (activeZone && !document.hidden) {',
-        '                    syncUserData(true);',
-        '                }',
-        '            }, 2000);',
-        '        }',
-
-        '        async function syncUserData(isSilent = false) {',
+        '        async function fetchAllData() {',
+        '            if (!activeZone) return;',
         '            try {',
-        '                const mRes = await fetch(`/api/master-drugs?zone=${activeZone}`, { headers: { "Authorization": "Bearer " + token } });',
-        '                if (!mRes.ok) return handleAccessError(mRes);',
-        '                const masterData = await mRes.json();',
-        '                const masterStr = JSON.stringify(masterData);',
-
-        '                const hRes = await fetch(`/api/dispense/sync?zone=${activeZone}`, { headers: { "Authorization": "Bearer " + token } });',
-        '                const historyData = await hRes.json();',
-        '                const historyStr = JSON.stringify(historyData);',
-
-        '                let masterChanged = false;',
-        '                let historyChanged = false;',
-
-        '                if (masterStr !== lastMasterCache) {',
-        '                    masterDrugsList = masterData;',
-        '                    lastMasterCache = masterStr;',
-        '                    masterChanged = true;',
+        '                const resDrugs = await fetch("/api/master-drugs?zone=" + encodeURIComponent(activeZone), {',
+        '                    headers: { "Authorization": "Bearer " + authToken }',
+        '                });',
+        '                if (resDrugs.ok) {',
+        '                    masterDrugs = await resDrugs.json();',
+        '                    renderMasterDrugs();',
+        '                    populateDrugDropdown();',
         '                }',
 
-        '                if (historyStr !== lastHistoryCache) {',
-        '                    dispenseHistory = historyData;',
-        '                    lastHistoryCache = historyStr;',
-        '                    historyChanged = true;',
-        '                    ',
-        '                    dailyLog = {};',
-        '                    dispenseHistory.forEach(h => {',
-        '                        dailyLog[h.drug_name] = (dailyLog[h.drug_name] || 0) + h.qty;',
-        '                    });',
+        '                const resDisp = await fetch("/api/dispense/sync?zone=" + encodeURIComponent(activeZone), {',
+        '                    headers: { "Authorization": "Bearer " + authToken }',
+        '                });',
+        '                if (resDisp.ok) {',
+        '                    dispensesLog = await resDisp.json();',
+        '                    renderLedger();',
         '                }',
 
-        '                // Smart update DOM only when actual data changes',
-        '                if (masterChanged || historyChanged) {',
-        '                    updateUI(masterChanged, historyChanged);',
+        '                if (currentUserRole === "ADMIN") {',
+        '                    loadAdminRegistryData();',
         '                }',
-        '            } catch(e) { console.log("Auto sync paused...", e); }',
-        '        }',
-
-        '        function updateUI(masterChanged = true, historyChanged = true) {',
-        '            if (masterChanged) {',
-        '                renderTable("masterBody", masterDrugsList.sort(), (item) => `',
-        '                    <td>${item}</td>',
-        '                    <td style="text-align:right">',
-        '                        <button class="action-link" style="color:var(--warning)" onclick="editMasterDrugInline(\'${item}\')">Edit</button>',
-        '                        <button class="action-link" style="color:var(--danger)" onclick="removeDrug(\'${item}\')">Del</button>',
-        '                    </td>',
-        '                `);',
-        '                document.getElementById("drugList").innerHTML = masterDrugsList.map(m => `<option value="${m}">`).join("");',
-        '            }',
-
-        '            if (historyChanged) {',
-        '                renderTable("dailyBody", Object.keys(dailyLog).sort(), (k) => `',
-        '                    <td>${k}</td>',
-        '                    <td><span class="badge">${dailyLog[k]}</span></td>',
-        '                    <td style="text-align:right">',
-        '                        <button class="action-link" style="color:var(--warning)" onclick="editCumulativeQty(\'${k}\', ${dailyLog[k]})">Edit</button>',
-        '                    </td>',
-        '                `);',
-
-        '                renderTable("historyBody", dispenseHistory.slice(0, 50), (i) => `',
-        '                    <td><span style="color:gray; font-size:10px">${i.timestamp}</span><br>${i.drug_name} (<b>${i.qty}</b>) - <i style="font-size:11px">${i.entered_by}</i></td>',
-        '                    <td style="text-align:right">',
-        '                        <button class="action-link" style="color:var(--warning)" onclick="editHistoryQty(${i.id}, ${i.qty})">Edit</button>',
-        '                        <button class="action-link" style="color:var(--danger)" onclick="undoTransaction(${i.id})">Undo</button>',
-        '                    </td>',
-        '                `);',
-        '            }',
-        '        }',
-
-        '        function renderTable(id, data, templateFn) {',
-        '            document.getElementById(id).innerHTML = data.map(item => `<tr>${templateFn(item)}</tr>`).join("");',
-        '        }',
-
-        '        function setQty(v) {',
-        '            document.getElementById("dispenseAmount").value = v;',
-        '            document.getElementById("recordBtn").focus();',
+        '            } catch(e) {}',
         '        }',
 
         '        async function registerDrug() {',
-        '            const i = document.getElementById("newDrugName");',
-        '            const d = i.value.trim().toUpperCase();',
-        '            if (!d) return;',
+        '            const input = document.getElementById("newDrugName");',
+        '            const dName = input.value.trim();',
+        '            if (!dName) return;',
         '            await fetch("/api/master-drugs", {',
         '                method: "POST",',
-        '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
-        '                body: JSON.stringify({ zone: activeZone, drug_name: d })',
+        '                headers: { "Authorization": "Bearer " + authToken, "Content-Type": "application/json" },',
+        '                body: JSON.stringify({ zone: activeZone, drug_name: dName })',
         '            });',
-        '            i.value = "";',
-        '            syncUserData();',
+        '            input.value = "";',
+        '            fetchAllData();',
         '        }',
 
-        '        async function dispenseDrug() {',
-        '            const nI = document.getElementById("searchDrug");',
-        '            const aI = document.getElementById("dispenseAmount");',
-        '            const d = nI.value.trim().toUpperCase();',
-        '            const q = parseInt(aI.value);',
+        '        async function deleteDrug(dName) {',
+        '            if (!confirm("Remove " + dName + " from master directory?")) return;',
+        '            await fetch("/api/master-drugs", {',
+        '                method: "DELETE",',
+        '                headers: { "Authorization": "Bearer " + authToken, "Content-Type": "application/json" },',
+        '                body: JSON.stringify({ zone: activeZone, drug_name: dName })',
+        '            });',
+        '            fetchAllData();',
+        '        }',
 
-        '            if (!masterDrugsList.includes(d)) return alert("Drug not found in Master Directory. Please register it first.");',
-        '            if (isNaN(q) || q <= 0) return alert("Please enter a valid quantity.");',
+        '        async function renameDrugPrompt(oldName) {',
+        '            const newName = prompt("Enter corrected drug name:", oldName);',
+        '            if (!newName || newName.trim() === oldName) return;',
+        '            await fetch("/api/master-drugs/rename", {',
+        '                method: "PUT",',
+        '                headers: { "Authorization": "Bearer " + authToken, "Content-Type": "application/json" },',
+        '                body: JSON.stringify({ zone: activeZone, oldName: oldName, newName: newName })',
+        '            });',
+        '            fetchAllData();',
+        '        }',
+
+        '        function renderMasterDrugs() {',
+        '            const filter = (document.getElementById("drugSearch").value || "").toUpperCase();',
+        '            const tbody = document.getElementById("master-tbody");',
+        '            tbody.innerHTML = "";',
+
+        '            masterDrugs.filter(d => d.includes(filter)).forEach(d => {',
+        '                let tr = document.createElement("tr");',
+        '                tr.innerHTML = `<td><b>${d}</b></td><td>` +',
+        '                    `<button class="action-link" onclick="renameDrugPrompt(\'${d}\')">Rename</button> | ` +',
+        '                    `<button class="action-link" style="color:var(--danger)" onclick="deleteDrug(\'${d}\')">Remove</button>` +',
+        '                    `</td>`;',
+        '                tbody.appendChild(tr);',
+        '            });',
+        '        }',
+
+        '        function populateDrugDropdown() {',
+        '            const select = document.getElementById("dispenseDrugSelect");',
+        '            const currentVal = select.value;',
+        '            select.innerHTML = \'<option value="">-- Select Drug --</option>\';',
+        '            masterDrugs.forEach(d => {',
+        '                let opt = document.createElement("option");',
+        '                opt.value = d;',
+        '                opt.innerText = d;',
+        '                if (d === currentVal) opt.selected = true;',
+        '                select.appendChild(opt);',
+        '            });',
+        '        }',
+
+        '        function setDispenseQty(q) {',
+        '            document.getElementById("dispenseQty").value = q;',
+        '        }',
+
+        '        async function submitDispense() {',
+        '            const drugName = document.getElementById("dispenseDrugSelect").value;',
+        '            const qty = parseInt(document.getElementById("dispenseQty").value);',
+        '            if (!drugName) { alert("Please select a drug."); return; }',
+        '            if (isNaN(qty) || qty <= 0) { alert("Please enter valid quantity."); return; }',
 
         '            await fetch("/api/dispense", {',
         '                method: "POST",',
-        '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
-        '                body: JSON.stringify({ zone: activeZone, drug_name: d, qty: q })',
+        '                headers: { "Authorization": "Bearer " + authToken, "Content-Type": "application/json" },',
+        '                body: JSON.stringify({ zone: activeZone, drug_name: drugName, qty: qty })',
         '            });',
 
-        '            nI.value = ""; aI.value = "";',
-        '            syncUserData();',
-        '            nI.focus();',
+        '            document.getElementById("dispenseQty").value = "1";',
+        '            fetchAllData();',
         '        }',
 
-        '        async function editCumulativeQty(drugName, currentQty) {',
-        '            const newQty = prompt(`Edit Cumulative Quantity for ${drugName}:`, currentQty);',
-        '            if (newQty === null || isNaN(parseInt(newQty)) || parseInt(newQty) < 0) return;',
+        '        function renderLedger() {',
+        '            const filter = (document.getElementById("ledgerSearch").value || "").toUpperCase();',
+        '            const tbody = document.getElementById("ledger-tbody");',
+        '            tbody.innerHTML = "";',
 
-        '            await fetch("/api/dispense/adjust-cumulative", {',
-        '                method: "PUT",',
-        '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
-        '                body: JSON.stringify({ zone: activeZone, drug_name: drugName, new_qty: parseInt(newQty) })',
+        '            dispensesLog.filter(item => String(item.drug_name).toUpperCase().includes(filter) || String(item.entered_by).toUpperCase().includes(filter)).forEach(item => {',
+        '                let tr = document.createElement("tr");',
+        '                tr.innerHTML = `<td style="font-size:11px; color:var(--text-muted);">${item.timestamp}</td>` +',
+        '                    `<td><b>${item.drug_name}</b></td>` +',
+        '                    `<td><span class="badge">${item.qty}</span></td>` +',
+        '                    `<td style="font-size:12px;">${item.entered_by}</td>` +',
+        '                    `<td><button class="action-link" style="color:var(--danger)" onclick="deleteDispenseRecord(${item.id})">Delete</button></td>`;',
+        '                tbody.appendChild(tr);',
         '            });',
-        '            syncUserData();',
         '        }',
 
-        '        async function editHistoryQty(id, oldQty) {',
-        '            const nq = prompt("Enter updated quantity:", oldQty);',
-        '            if (!nq || isNaN(parseInt(nq))) return;',
-        '            await fetch(`/api/dispense/${id}`, {',
-        '                method: "PUT",',
-        '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
-        '                body: JSON.stringify({ qty: parseInt(nq) })',
-        '            });',
-        '            syncUserData();',
-        '        }',
-
-        '        async function undoTransaction(id) {',
-        '            if (!confirm("Undo this dispense entry?")) return;',
-        '            await fetch(`/api/dispense/${id}`, { method: "DELETE", headers: { "Authorization": "Bearer " + token } });',
-        '            syncUserData();',
-        '        }',
-
-        '        async function removeDrug(dName) {',
-        '            if (!confirm(`Delete ${dName} from Master Directory?`)) return;',
-        '            await fetch("/api/master-drugs", {',
+        '        async function deleteDispenseRecord(id) {',
+        '            if (!confirm("Delete transaction record?")) return;',
+        '            await fetch("/api/dispense/" + id, {',
         '                method: "DELETE",',
-        '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
-        '                body: JSON.stringify({ zone: activeZone, drug_name: dName })',
+        '                headers: { "Authorization": "Bearer " + authToken }',
         '            });',
-        '            syncUserData();',
+        '            fetchAllData();',
         '        }',
 
-        '        async function editMasterDrugInline(oldName) {',
-        '            const newName = prompt(`Edit drug name for ${oldName}:`, oldName);',
-        '            if (!newName || newName.trim().toUpperCase() === oldName) return;',
-
-        '            await fetch("/api/master-drugs/rename", {',
-        '                method: "PUT",',
-        '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
-        '                body: JSON.stringify({ zone: activeZone, oldName: oldName, newName: newName.trim().toUpperCase() })',
+        '        async function clearAllZoneData() {',
+        '            if (!confirm("WARNING: Clear all transactions for zone " + activeZone + "?")) return;',
+        '            await fetch("/api/dispense/clear/all", {',
+        '                method: "DELETE",',
+        '                headers: { "Authorization": "Bearer " + authToken, "Content-Type": "application/json" },',
+        '                body: JSON.stringify({ zone: activeZone })',
         '            });',
-
-        '            syncUserData();',
+        '            fetchAllData();',
         '        }',
 
-        '        async function resetDailyDataOnly() {',
-        '            if (confirm("Clear Today\'s Totals and History for active zone?")) {',
-        '                await fetch("/api/dispense/clear/all", {',
-        '                    method: "DELETE",',
-        '                    headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
-        '                    body: JSON.stringify({ zone: activeZone })',
-        '                });',
-        '                syncUserData();',
-        '            }',
-        '        }',
-
-        '        function clearHistoryOnly() { resetDailyDataOnly(); }',
-
-        '        function generateReport() {',
-        '            const remarks = document.getElementById("pdfRemarks").value.trim();',
-        '            if (!remarks) return alert("Remarks field is mandatory for downloading PDF reporting.");',
-
-        '            const { jsPDF } = window.jspdf;',
-        '            const doc = new jsPDF();',
-        '            doc.setFontSize(16);',
-        '            doc.text(`RXMEDISYNC DAILY REPORT - ${activeZone}`, 14, 20);',
-        '            doc.setFontSize(10);',
-        '            doc.text(`Date & Time: ${new Date().toLocaleString()} | Mandatory Remarks: ${remarks}`, 14, 28);',
-
-        '            const tableRows = Object.keys(dailyLog).sort().map(k => [k, dailyLog[k]]);',
-        '            doc.autoTable({',
-        '                startY: 35,',
-        '                head: [["Drug Name", "Cumulative Total Quantity"]],',
-        '                body: tableRows,',
-        '                didDrawPage: function (data) {',
-        '                    const pageCount = doc.internal.getNumberOfPages();',
-        '                    doc.setFontSize(8);',
-        '                    doc.setTextColor(100);',
-        '                    doc.text("Lead Developer: Debanjan Singha", 14, doc.internal.pageSize.height - 10);',
-        '                    doc.text(`Page ${data.pageNumber} of ${pageCount}`, doc.internal.pageSize.width - 30, doc.internal.pageSize.height - 10, { align: "right" });',
-        '                }',
-        '            });',
-        '            doc.save(`RxMediReport_${activeZone}_${Date.now()}.pdf`);',
-        '        }',
-
-        '        function openEditModal(id, username, currentZonesStr) {',
-        '            document.getElementById("edit-user-id").value = id;',
-        '            document.getElementById("edit-user-name").innerText = "User Account: " + username;',
-        '            const currentZones = currentZonesStr.split(",");',
-        '            const container = document.getElementById("edit-zone-checkboxes");',
-        '            container.innerHTML = "";',
-        '            availableZonesList.forEach(z => {',
-        '                const isChecked = currentZones.includes(z) ? "checked" : "";',
-        '                container.innerHTML += `<label class="zone-checkbox-item"><input type="checkbox" value="${z}" name="edit-assigned-zones" ${isChecked}> ${z}</label>`;',
-        '            });',
-        '            document.getElementById("edit-zones-modal").classList.remove("hidden");',
-        '        }',
-
-        '        function closeEditModal() { document.getElementById("edit-zones-modal").classList.add("hidden"); }',
-
-        '        async function saveUserZones() {',
-        '            const id = document.getElementById("edit-user-id").value;',
-        '            const selectedCheckboxes = document.querySelectorAll(\'input[name="edit-assigned-zones"]:checked\');',
-        '            const z = Array.from(selectedCheckboxes).map(cb => cb.value);',
-        '            if (!z.length) return alert("Please select at least one zone before saving.");',
-
-        '            const res = await fetch(`/api/users/${id}/zones`, {',
-        '                method: "PUT",',
-        '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
-        '                body: JSON.stringify({ zones: z })',
-        '            });',
-        '            if (res.ok) { closeEditModal(); loadAdminData(); } else { alert("Failed to update user zones."); }',
-        '        }',
-
-        '        async function toggleUser(id, status) {',
-        '            await fetch(`/api/users/${id}/status`, {',
-        '                method: "PUT",',
-        '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
-        '                body: JSON.stringify({ status })',
-        '            });',
-        '            loadAdminData();',
-        '        }',
-
-        '        async function removeUser(id) {',
-        '            if (!confirm("Permanently remove user?")) return;',
-        '            await fetch(`/api/users/${id}`, { method: "DELETE", headers: { "Authorization": "Bearer " + token } });',
-        '            loadAdminData();',
-        '        }',
-
-        '        async function createUser() {',
-        '            const u = document.getElementById("nu-name").value;',
-        '            const p = document.getElementById("nu-phone").value;',
-        '            const pass = document.getElementById("nu-pass").value;',
-        '            const selectedCheckboxes = document.querySelectorAll(\'input[name="assigned-zones"]:checked\');',
-        '            const z = Array.from(selectedCheckboxes).map(cb => cb.value);',
-
-        '            if (!z.length) return alert("Select at least one zone from checkboxes.");',
-        '            const res = await fetch("/api/users", {',
-        '                method: "POST",',
-        '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
-        '                body: JSON.stringify({ username: u, phone: p, password: pass, zones: z })',
-        '            });',
-        '            if (res.ok) { alert("User created successfully"); loadAdminData(); } else { alert("Failed to create user"); }',
-        '        }',
-
-        '        function normalizeImportData(rawData) {',
-        '            let items = rawData;',
-        '            if (typeof items === "string") {',
-        '                try { items = JSON.parse(items); } catch(e) {}',
-        '            }',
-        '            if (!Array.isArray(items) && typeof items === "object" && items !== null) {',
-        '                const firstArrayKey = Object.keys(items).find(k => Array.isArray(items[k]));',
-        '                items = firstArrayKey ? items[firstArrayKey] : [items];',
-        '            }',
-        '            return Array.isArray(items) ? items : [items];',
-        '        }',
-
-        '        async function processImport(type, mode) {',
-        '            const targetZone = document.getElementById("admin-import-zone").value;',
-        '            const fileInput = document.getElementById("admin-file-import");',
-        '            if (!targetZone) return alert("Select a target zone for import.");',
-        '            if (!fileInput.files.length) return alert("Choose a file.");',
+        '        // User-facing Import Handler (Merge vs Reset & Add)',
+        '        async function processUserImport(mode) {',
+        '            const fileInput = document.getElementById("user-file-import");',
+        '            if (!fileInput.files.length) { alert("Please select a file to import."); return; }',
 
         '            const file = fileInput.files[0];',
-        '            const fileName = file.name.toLowerCase();',
+        '            const reader = new FileReader();',
 
-        '            if (fileName.endsWith(".json")) {',
-        '                const reader = new FileReader();',
-        '                reader.onload = async (e) => {',
-        '                    try {',
-        '                        let parsedData = JSON.parse(e.target.result);',
-        '                        const normalizedArr = normalizeImportData(parsedData);',
-        '                        sendImportPayload(type, mode, targetZone, normalizedArr);',
-        '                    } catch(err) { alert("Invalid JSON file format."); }',
-        '                };',
+        '            reader.onload = async function(e) {',
+        '                try {',
+        '                    let parsedData = [];',
+        '                    if (file.name.endsWith(".json")) {',
+        '                        let jsonContent = JSON.parse(e.target.result);',
+        '                        if (jsonContent.raw_transactions && Array.isArray(jsonContent.raw_transactions)) {',
+        '                            parsedData = jsonContent.raw_transactions;',
+        '                        } else if (jsonContent.cumulative_totals) {',
+        '                            parsedData = Object.keys(jsonContent.cumulative_totals).map(k => ({ drug_name: k, qty: jsonContent.cumulative_totals[k] }));',
+        '                        } else if (Array.isArray(jsonContent)) {',
+        '                            parsedData = jsonContent;',
+        '                        } else {',
+        '                            parsedData = [jsonContent];',
+        '                        }',
+        '                    } else {',
+        '                        const data = new Uint8Array(e.target.result);',
+        '                        const workbook = XLSX.read(data, { type: "array" });',
+        '                        const firstSheet = workbook.SheetNames[0];',
+        '                        parsedData = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheet]);',
+        '                    }',
+
+        '                    const res = await fetch("/api/dispense/import", {',
+        '                        method: "POST",',
+        '                        headers: { "Authorization": "Bearer " + authToken, "Content-Type": "application/json" },',
+        '                        body: JSON.stringify({ zone: activeZone, mode: mode, entries: parsedData })',
+        '                    });',
+        '                    const result = await res.json();',
+        '                    alert(result.message || result.error);',
+        '                    fileInput.value = "";',
+        '                    fetchAllData();',
+        '                } catch (err) {',
+        '                    alert("Import parsing error: " + err.message);',
+        '                }',
+        '            };',
+
+        '            if (file.name.endsWith(".json")) {',
         '                reader.readAsText(file);',
-        '            } else if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {',
-        '                const reader = new FileReader();',
-        '                reader.onload = async (e) => {',
-        '                    const data = new Uint8Array(e.target.result);',
-        '                    const workbook = XLSX.read(data, { type: "array" });',
-        '                    const sheet = workbook.Sheets[workbook.SheetNames[0]];',
-        '                    const parsedRows = XLSX.utils.sheet_to_json(sheet);',
-        '                    sendImportPayload(type, mode, targetZone, parsedRows);',
-        '                };',
+        '            } else {',
         '                reader.readAsArrayBuffer(file);',
         '            }',
         '        }',
 
-        '        async function sendImportPayload(type, mode, zone, items) {',
-        '            const endpoint = "/api/master-drugs/import";',
-        '            const bodyKey = "drugs";',
-        '            const res = await fetch(endpoint, {',
+        '        async function loadAdminRegistryData() {',
+        '            try {',
+        '                const resZ = await fetch("/api/zones", { headers: { "Authorization": "Bearer " + authToken } });',
+        '                const zones = await resZ.json();',
+        '                const zoneContainer = document.getElementById("zone-checkbox-container");',
+        '                zoneContainer.innerHTML = "";',
+        '                zones.forEach(z => {',
+        '                    let lbl = document.createElement("label");',
+        '                    lbl.className = "zone-checkbox-item";',
+        '                    lbl.innerHTML = `<input type="checkbox" value="${z}" name="admin-user-zone"> ${z}`;',
+        '                    zoneContainer.appendChild(lbl);',
+        '                });',
+
+        '                const importSelect = document.getElementById("admin-import-zone");',
+        '                importSelect.innerHTML = \'<option value="">-- Select Target Zone --</option>\';',
+        '                zones.forEach(z => {',
+        '                    let opt = document.createElement("option");',
+        '                    opt.value = z;',
+        '                    opt.innerText = z;',
+        '                    importSelect.appendChild(opt);',
+        '                });',
+
+        '                const resU = await fetch("/api/users", { headers: { "Authorization": "Bearer " + authToken } });',
+        '                const users = await resU.json();',
+        '                const uTbody = document.getElementById("users-table");',
+        '                uTbody.innerHTML = "";',
+        '                users.forEach(u => {',
+        '                    let tr = document.createElement("tr");',
+        '                    tr.innerHTML = `<td><b>${u.username}</b></td>` +',
+        '                        `<td>${u.phone}</td>` +',
+        '                        `<td><span class="badge">${u.zones.join(", ")}</span></td>` +',
+        '                        `<td>${u.status === 1 ? "<span style=\'color:var(--success)\'>Active</span>" : "<span style=\'color:var(--danger)\'>Disabled</span>"}</td>` +',
+        '                        `<td>` +',
+        '                        `<button class="action-link" onclick="toggleUserStatus(${u.id}, ${u.status === 1 ? 0 : 1})">${u.status === 1 ? "Disable" : "Enable"}</button> | ` +',
+        '                        `<button class="action-link" style="color:var(--danger)" onclick="deleteUser(${u.id})">Delete</button>` +',
+        '                        `</td>`;',
+        '                    uTbody.appendChild(tr);',
+        '                });',
+
+        '                const resAct = await fetch("/api/admin/activity-logs", { headers: { "Authorization": "Bearer " + authToken } });',
+        '                const acts = await resAct.json();',
+        '                const actTbody = document.getElementById("activity-table");',
+        '                actTbody.innerHTML = "";',
+        '                acts.forEach(a => {',
+        '                    let tr = document.createElement("tr");',
+        '                    tr.innerHTML = `<td style="font-size:11px;">${a.timestamp}</td><td><b>${a.username}</b></td><td>${a.phone}</td><td><span class="badge">${a.action}</span></td>`;',
+        '                    actTbody.appendChild(tr);',
+        '                });',
+
+        '                const resAud = await fetch("/api/admin/audit-logs", { headers: { "Authorization": "Bearer " + authToken } });',
+        '                const auds = await resAud.json();',
+        '                const audTbody = document.getElementById("audit-table");',
+        '                audTbody.innerHTML = "";',
+        '                auds.forEach(au => {',
+        '                    let tr = document.createElement("tr");',
+        '                    tr.innerHTML = `<td style="font-size:11px;">${au.timestamp}</td><td><b>${au.username}</b></td><td>${au.phone}</td><td style="font-size:11px;">${au.zone}</td><td><span class="badge">${au.action}</span></td>`;',
+        '                    audTbody.appendChild(tr);',
+        '                });',
+        '            } catch(e) {}',
+        '        }',
+
+        '        async function registerNewZone() {',
+        '            const zInput = document.getElementById("new-zone-input");',
+        '            const zName = zInput.value.trim();',
+        '            if (!zName) return;',
+        '            await fetch("/api/zones", {',
         '                method: "POST",',
-        '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
-        '                body: JSON.stringify({ zone, mode, [bodyKey]: items })',
+        '                headers: { "Authorization": "Bearer " + authToken, "Content-Type": "application/json" },',
+        '                body: JSON.stringify({ zone_name: zName })',
+        '            });',
+        '            zInput.value = "";',
+        '            loadAdminRegistryData();',
+        '        }',
+
+        '        async function createUser() {',
+        '            const name = document.getElementById("nu-name").value.trim();',
+        '            const phone = document.getElementById("nu-phone").value.trim();',
+        '            const pass = document.getElementById("nu-pass").value.trim();',
+        '            const checkboxes = document.querySelectorAll("input[name=\'admin-user-zone\']:checked");',
+        '            let selectedZones = Array.from(checkboxes).map(cb => cb.value);',
+
+        '            if (!name || !phone || !pass || selectedZones.length === 0) {',
+        '                alert("Please provide all credentials and select at least one zone.");',
+        '                return;',
+        '            }',
+
+        '            const res = await fetch("/api/users", {',
+        '                method: "POST",',
+        '                headers: { "Authorization": "Bearer " + authToken, "Content-Type": "application/json" },',
+        '                body: JSON.stringify({ username: name, phone: phone, password: pass, zones: selectedZones })',
         '            });',
         '            const data = await res.json();',
-        '            if (res.ok) alert(data.message || "Import success!"); else alert("Import error: " + data.error);',
+        '            if (!res.ok) { alert(data.error); return; }',
+
+        '            document.getElementById("nu-name").value = "";',
+        '            document.getElementById("nu-phone").value = "";',
+        '            document.getElementById("nu-pass").value = "";',
+        '            loadAdminRegistryData();',
+        '        }',
+
+        '        async function toggleUserStatus(id, newStatus) {',
+        '            await fetch("/api/users/" + id + "/status", {',
+        '                method: "PUT",',
+        '                headers: { "Authorization": "Bearer " + authToken, "Content-Type": "application/json" },',
+        '                body: JSON.stringify({ status: newStatus })',
+        '            });',
+        '            loadAdminRegistryData();',
+        '        }',
+
+        '        async function deleteUser(id) {',
+        '            if (!confirm("Permanently delete user account?")) return;',
+        '            await fetch("/api/users/" + id, {',
+        '                method: "DELETE",',
+        '                headers: { "Authorization": "Bearer " + authToken }',
+        '            });',
+        '            loadAdminRegistryData();',
         '        }',
 
         '        async function updateAdminProfile() {',
-        '            const u = document.getElementById("admin-new-user").value;',
-        '            const p = document.getElementById("admin-new-pass").value;',
+        '            const u = document.getElementById("admin-new-user").value.trim();',
+        '            const p = document.getElementById("admin-new-pass").value.trim();',
+        '            if (!u || !p) { alert("Provide new admin username and password."); return; }',
         '            const res = await fetch("/api/admin/profile", {',
         '                method: "PUT",',
-        '                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },',
+        '                headers: { "Authorization": "Bearer " + authToken, "Content-Type": "application/json" },',
         '                body: JSON.stringify({ newUsername: u, newPassword: p })',
         '            });',
-        '            if (res.ok) { alert("Credentials updated. Logging out..."); handleLogout(); }',
+        '            const data = await res.json();',
+        '            alert(data.message || data.error);',
         '        }',
 
-        '        function filterTable(id, val) {',
-        '            const rows = document.getElementById(id).rows;',
-        '            const s = val.toUpperCase();',
-        '            for (let r of rows) r.style.display = r.innerText.toUpperCase().includes(s) ? "" : "none";',
+        '        async function processImport(targetType, mode) {',
+        '            const zone = document.getElementById("admin-import-zone").value;',
+        '            const fileInput = document.getElementById("admin-file-import");',
+        '            if (!zone) { alert("Select target zone for import."); return; }',
+        '            if (!fileInput.files.length) { alert("Please select a file to import."); return; }',
+
+        '            const file = fileInput.files[0];',
+        '            const reader = new FileReader();',
+
+        '            reader.onload = async function(e) {',
+        '                try {',
+        '                    let parsedData = [];',
+        '                    if (file.name.endsWith(".json")) {',
+        '                        parsedData = JSON.parse(e.target.result);',
+        '                    } else {',
+        '                        const data = new Uint8Array(e.target.result);',
+        '                        const workbook = XLSX.read(data, { type: "array" });',
+        '                        const firstSheet = workbook.SheetNames[0];',
+        '                        parsedData = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheet]);',
+        '                    }',
+
+        '                    const res = await fetch("/api/master-drugs/import", {',
+        '                        method: "POST",',
+        '                        headers: { "Authorization": "Bearer " + authToken, "Content-Type": "application/json" },',
+        '                        body: JSON.stringify({ zone: zone, mode: mode, drugs: parsedData })',
+        '                    });',
+        '                    const result = await res.json();',
+        '                    alert(result.message || result.error);',
+        '                    fileInput.value = "";',
+        '                    fetchAllData();',
+        '                } catch (err) {',
+        '                    alert("Import parsing error: " + err.message);',
+        '                }',
+        '            };',
+
+        '            if (file.name.endsWith(".json")) {',
+        '                reader.readAsText(file);',
+        '            } else {',
+        '                reader.readAsArrayBuffer(file);',
+        '            }',
         '        }',
 
-        '        function handleAccessError(res) {',
-        '            if (res.status === 403) {',
-        '                alert("ERROR! PLEASE CONTACT TO THE ADMIN");',
-        '                handleLogout();',
+        '        // Export Report: Generates PDF and automatically downloads accompanying JSON backup',
+        '        function exportReport(type) {',
+        '            let totals = {};',
+        '            dispensesLog.forEach(item => {',
+        '                let d = item.drug_name;',
+        '                totals[d] = (totals[d] || 0) + item.qty;',
+        '            });',
+
+        '            let rows = Object.keys(totals).map(d => [d, totals[d]]);',
+
+        '            if (type === "excel") {',
+        '                let wsData = [["Drug Name", "Total Dispensed Qty"], ...rows];',
+        '                let ws = XLSX.utils.aoa_to_sheet(wsData);',
+        '                let wb = XLSX.utils.book_new();',
+        '                XLSX.utils.book_append_sheet(wb, ws, "Zone Summary");',
+        '                XLSX.writeFile(wb, "RxMediSync_" + activeZone + "_Report.xlsx");',
+        '            } else if (type === "pdf") {',
+        '                const { jsPDF } = window.jspdf;',
+        '                const doc = new jsPDF();',
+        '                doc.text("RxMEDISYNC PRO - Zone Report: " + activeZone, 14, 20);',
+        '                doc.autoTable({',
+        '                    startY: 25,',
+        '                    head: [["Drug Name", "Total Dispensed Qty"]],',
+        '                    body: rows',
+        '                });',
+        '                doc.save("RxMediSync_" + activeZone + "_Report.pdf");',
+
+        '                // Automatically download the accompanying JSON backup file',
+        '                triggerBackupDownload();',
         '            }',
         '        }',
         '    </script>',
         '</body>',
         '</html>'
-    ].join('\n');
-
-    res.setHeader('Content-Type', 'text/html');
-    res.send(htmlLines);
+    ];
+    res.send(htmlLines.join('\n'));
 });
 
 app.listen(PORT, () => {
-    console.log("High Performance Server running on port " + PORT);
+    console.log(`RxMediSync Pro Engine running seamlessly on port ${PORT}`);
 });

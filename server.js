@@ -2,7 +2,9 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const sqlite3 = require('sqlite3').verbose();
+
+// 🔴 TURSO CLOUD DRIVER
+const sqlite3 = require('@libsql/sqlite3').verbose(); 
 
 let xlsx;
 try {
@@ -15,14 +17,18 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 const SECRET_KEY = process.env.JWT_SECRET || "rxmedisync_ultra_secure_debanjan_2026_key";
 
+// ==========================================
+// 🔴 TURSO CLOUD CONNECTION SETTINGS
+// ==========================================
+const TURSO_URL = process.env.TURSO_URL || "YOUR_TURSO_URL_HERE";
+const TURSO_AUTH_TOKEN = process.env.TURSO_AUTH_TOKEN || "YOUR_TURSO_AUTH_TOKEN_HERE";
+
 const COPYRIGHT_OWNER = "Debanjan Singha";
 console.log("================================================================");
-console.log(" RXMEDISYNC PRO | ULTRA-FAST REALTIME ENTERPRISE ENGINE");
+console.log(" RXMEDISYNC PRO | TURSO CLOUD SQLITE EDITION");
 console.log(" Lead System Architect & Developer: " + COPYRIGHT_OWNER);
 console.log(" Copyright (c) 2026. All Rights Reserved.");
-console.log(" CRITICAL HOSTING NOTE: Ensure this runs on a server with persistent ");
-console.log(" storage (VPS/EC2/Persistent Volume). Ephemeral hosts (Heroku/Render free) ");
-console.log(" will automatically delete the local .db file upon server sleep.");
+console.log(" DATA SAFEGUARD: Connected to Permanent Turso Edge Storage.");
 console.log("================================================================");
 
 // Strict Data Firewall & Security Headers
@@ -41,14 +47,13 @@ app.use((req, res, next) => {
 app.use(cors());
 app.use(express.json({ limit: '100mb' }));
 
-// Initialize Database with WAL Mode & High Concurrency Wait Times
-const db = new sqlite3.Database('./pharmacy.db', (err) => {
+// Initialize Turso Cloud Database Connection
+const db = new sqlite3.Database(`${TURSO_URL}?authToken=${TURSO_AUTH_TOKEN}`, (err) => {
     if (!err) {
-        db.configure('busyTimeout', 15000); // Wait up to 15 seconds if 100+ users hit DB at exact same time
-        db.run("PRAGMA journal_mode = WAL;");
-        db.run("PRAGMA synchronous = NORMAL;");
-        db.run("PRAGMA cache_size = -64000;"); // 64MB Memory Cache
+        console.log("✅ Turso Cloud Connected Successfully!");
         initDb();
+    } else {
+        console.error("❌ Turso Connection Error. Please check your URL and Token.", err);
     }
 });
 
@@ -61,19 +66,16 @@ function initDb() {
         db.run("CREATE TABLE IF NOT EXISTS activity_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, phone TEXT, action TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)");
         db.run("CREATE TABLE IF NOT EXISTS zone_registry (id INTEGER PRIMARY KEY AUTOINCREMENT, zone_name TEXT UNIQUE)");
 
-        // High Speed Database Indexes for 1M+ Records Querying
         db.run("CREATE INDEX IF NOT EXISTS idx_master_zone_drug ON master_drugs(zone, drug_name)");
         db.run("CREATE INDEX IF NOT EXISTS idx_dispenses_zone ON dispenses(zone)");
-        db.run("CREATE INDEX IF NOT EXISTS idx_dispenses_zone_drug ON dispenses(zone, drug_name)"); // Critical for fast backend grouping
+        db.run("CREATE INDEX IF NOT EXISTS idx_dispenses_zone_drug ON dispenses(zone, drug_name)");
         db.run("CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_logs(timestamp)");
-
-        // PER USER REQUIREMENT: NO DATA MUST BE AUTO-DELETED UNDER ANY CIRCUMSTANCES.
-        // The 30-day automatic deletion query has been completely removed.
 
         db.get("SELECT * FROM users WHERE role = 'ADMIN'", async (err, row) => {
             if (!row) {
                 const hash = await bcrypt.hash('admin123', 10);
                 db.run("INSERT INTO users (username, phone, password, role, zones, status) VALUES ('admin', '0000000000', ?, 'ADMIN', '[\"ALL\"]', 1)", [hash]);
+                console.log("Default admin account created.");
             }
         });
     });
@@ -142,7 +144,6 @@ app.post('/api/logout', authenticateToken, (req, res) => {
     res.json({ message: "Logged out successfully" });
 });
 
-// Admin Control Routes (Unchanged)
 app.put('/api/admin/profile', authenticateToken, async (req, res) => {
     if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required." });
     const hash = await bcrypt.hash(req.body.newPassword, 10);
@@ -155,6 +156,7 @@ app.put('/api/admin/profile', authenticateToken, async (req, res) => {
 app.get('/api/users', authenticateToken, (req, res) => {
     if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required." });
     db.all("SELECT id, username, phone, role, zones, status FROM users WHERE role != 'ADMIN'", [], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
         res.json(rows.map(r => ({ ...r, zones: JSON.parse(r.zones || "[]") })));
     });
 });
@@ -186,7 +188,10 @@ app.delete('/api/users/:id', authenticateToken, (req, res) => {
 
 app.get('/api/zones', authenticateToken, (req, res) => {
     if (req.user.role === 'ADMIN') {
-        db.all("SELECT zone_name FROM zone_registry ORDER BY zone_name ASC", [], (err, rows) => res.json(rows.map(r => r.zone_name)));
+        db.all("SELECT zone_name FROM zone_registry ORDER BY zone_name ASC", [], (err, rows) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json(rows.map(r => r.zone_name));
+        });
     } else {
         res.json(JSON.parse(req.user.zones || "[]"));
     }
@@ -199,7 +204,7 @@ app.post('/api/zones', authenticateToken, (req, res) => {
 
 app.get('/api/admin/audit-logs', authenticateToken, (req, res) => {
     if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required." });
-    db.all("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 200", [], (err, rows) => res.json(rows));
+    db.all("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 200", [], (err, rows) => res.json(rows || []));
 });
 
 app.delete('/api/admin/audit-logs/clear', authenticateToken, (req, res) => {
@@ -209,7 +214,7 @@ app.delete('/api/admin/audit-logs/clear', authenticateToken, (req, res) => {
 
 app.get('/api/admin/activity-logs', authenticateToken, (req, res) => {
     if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Admin access required." });
-    db.all("SELECT * FROM activity_logs ORDER BY id DESC LIMIT 500", [], (err, rows) => res.json(rows));
+    db.all("SELECT * FROM activity_logs ORDER BY id DESC LIMIT 500", [], (err, rows) => res.json(rows || []));
 });
 
 app.delete('/api/admin/activity-logs/clear', authenticateToken, (req, res) => {
@@ -217,9 +222,11 @@ app.delete('/api/admin/activity-logs/clear', authenticateToken, (req, res) => {
     db.run("DELETE FROM activity_logs", [], () => res.json({ message: "Logs cleared." }));
 });
 
-// MASTER DRUGS
+// ==========================================
+// MASTER DIRECTORY (REBUILT FOR TURSO NETWORK)
+// ==========================================
 app.get('/api/master-drugs', authenticateToken, (req, res) => {
-    db.all("SELECT drug_name FROM master_drugs WHERE zone = ? ORDER BY drug_name ASC", [req.query.zone], (err, rows) => res.json(rows.map(r => r.drug_name)));
+    db.all("SELECT drug_name FROM master_drugs WHERE zone = ? ORDER BY drug_name ASC", [req.query.zone], (err, rows) => res.json((rows || []).map(r => r.drug_name)));
 });
 
 app.post('/api/master-drugs', authenticateToken, (req, res) => {
@@ -237,20 +244,48 @@ app.delete('/api/master-drugs', authenticateToken, (req, res) => {
     db.run("DELETE FROM master_drugs WHERE drug_name = ? AND zone = ?", [req.body.drug_name, req.body.zone], () => res.json({ message: "Drug removed." }));
 });
 
+// REWRITTEN FOR HIGH-SPEED CLOUD BATCH INSERTION
 app.post('/api/master-drugs/import', authenticateToken, (req, res) => {
     const { mode, zone, drugs } = req.body;
     let items = Array.isArray(drugs) ? drugs : [drugs];
+    
+    let drugNames = [];
+    items.forEach(item => {
+        extractDrugNames(item).forEach(dName => {
+            if (dName && !drugNames.includes(dName)) drugNames.push(dName);
+        });
+    });
+
+    if (drugNames.length === 0) return res.status(400).json({ error: "No valid drug names found in file." });
+
     db.serialize(() => {
         db.run("BEGIN TRANSACTION");
         if (mode === 'reset') db.run("DELETE FROM master_drugs WHERE zone = ?", [zone]);
-        const stmt = db.prepare("INSERT OR IGNORE INTO master_drugs (zone, drug_name) VALUES (?, ?)");
-        items.forEach(item => extractDrugNames(item).forEach(dName => stmt.run(zone, dName)));
-        stmt.finalize();
-        db.run("COMMIT", () => res.json({ message: "Master Directory imported." }));
+        
+        const batchSize = 50;
+        let importedCount = 0;
+        
+        for (let i = 0; i < drugNames.length; i += batchSize) {
+            const batch = drugNames.slice(i, i + batchSize);
+            const placeholders = batch.map(() => "(?, ?)").join(",");
+            const params = [];
+            batch.forEach(dName => {
+                params.push(zone, dName);
+                importedCount++;
+            });
+            db.run(`INSERT OR IGNORE INTO master_drugs (zone, drug_name) VALUES ${placeholders}`, params);
+        }
+        
+        db.run("COMMIT", (err) => {
+            if (err) return res.status(500).json({ error: "Failed to commit bulk import." });
+            res.json({ message: `Master Directory imported successfully. Processed ${importedCount} items.` });
+        });
     });
 });
 
+// ==========================================
 // USER DISPENSE API
+// ==========================================
 app.post('/api/dispense', authenticateToken, (req, res) => {
     db.run("INSERT INTO dispenses (zone, drug_name, qty, entered_by) VALUES (?, ?, ?, ?)", 
         [req.body.zone, req.body.drug_name.trim().toUpperCase(), parseInt(req.body.qty), req.user.username], 
@@ -258,7 +293,6 @@ app.post('/api/dispense', authenticateToken, (req, res) => {
     );
 });
 
-// CRITICAL FIX: To support 1,000,000+ entries, cumulative math is done server-side via SQL GROUP BY.
 app.get('/api/dispense/sync', authenticateToken, (req, res) => {
     const zone = req.query.zone;
     db.serialize(() => {
@@ -270,28 +304,40 @@ app.get('/api/dispense/sync', authenticateToken, (req, res) => {
     });
 });
 
+// REWRITTEN FOR HIGH-SPEED CLOUD BATCH INSERTION
 app.post('/api/dispense/import', authenticateToken, (req, res) => {
     const { mode, zone, items } = req.body;
     if (!zone || !items || !Array.isArray(items)) return res.status(400).json({ error: "Invalid payload." });
     
+    let validItems = [];
+    items.forEach(item => {
+        const drug = (item.drug_name || item.Drug || item.Name || Object.values(item)[0] || "").toString().trim().toUpperCase();
+        const qty = parseInt(item.total_qty || item.qty || item.Qty || item.Quantity || Object.values(item)[1] || 0);
+        if (drug && !isNaN(qty) && qty > 0) {
+            validItems.push({ drug, qty });
+        }
+    });
+
+    if (validItems.length === 0) return res.status(400).json({ error: "No valid data found in file." });
+
     db.serialize(() => {
         db.run("BEGIN TRANSACTION");
         if (mode === 'reset') db.run("DELETE FROM dispenses WHERE zone = ?", [zone]);
         
-        const stmt = db.prepare("INSERT INTO dispenses (zone, drug_name, qty, entered_by) VALUES (?, ?, ?, ?)");
-        let count = 0;
-        items.forEach(item => {
-            const drug = (item.drug_name || item.Drug || item.Name || Object.values(item)[0] || "").toString().trim().toUpperCase();
-            const qty = parseInt(item.total_qty || item.qty || item.Qty || item.Quantity || Object.values(item)[1] || 0);
-            if (drug && !isNaN(qty) && qty > 0) {
-                stmt.run(zone, drug, qty, req.user.username + " (Bulk Import)");
-                count++;
-            }
-        });
-        stmt.finalize();
+        const batchSize = 50;
+        for (let i = 0; i < validItems.length; i += batchSize) {
+            const batch = validItems.slice(i, i + batchSize);
+            const placeholders = batch.map(() => "(?, ?, ?, ?)").join(",");
+            const params = [];
+            batch.forEach(b => {
+                params.push(zone, b.drug, b.qty, req.user.username + " (Bulk Import)");
+            });
+            db.run(`INSERT INTO dispenses (zone, drug_name, qty, entered_by) VALUES ${placeholders}`, params);
+        }
+
         db.run("COMMIT", (err) => {
             if (err) return res.status(500).json({ error: "Import failed." });
-            res.json({ message: `Successfully processed ${count} bulk entries.` });
+            res.json({ message: `Successfully processed ${validItems.length} bulk entries.` });
         });
     });
 });
@@ -381,7 +427,7 @@ app.get('/', (req, res) => {
         '        <!-- LOGIN SCREEN -->',
         '        <div id="login-screen" class="panel" style="max-width: 420px; margin: 80px auto; text-align: center; padding: 35px;">',
         '            <h1 style="color:var(--sidebar); font-size: 24px; margin-bottom: 5px;">RxMEDISYNC<span style="color:var(--accent)">PRO</span></h1>',
-        '            <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 25px;">Real-Time Multi-User Pharmacy Engine</p>',
+        '            <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 25px;">Real-Time Multi-User Pharmacy Engine (Turso Cloud)</p>',
         '            <input type="text" id="login-username" placeholder="Username or Phone Number" onkeydown="if(event.key===\'Enter\') document.getElementById(\'login-password\').focus()">',
         '            <input type="password" id="login-password" placeholder="Password" onkeydown="if(event.key===\'Enter\') handleLogin()">',
         '            <button onclick="handleLogin()" class="primary-btn success" style="padding: 12px; margin-top: 10px; font-size: 15px;">AUTHENTICATE LOGIN</button>',
@@ -448,7 +494,7 @@ app.get('/', (req, res) => {
         '                <div class="panel">',
         '                    <h2>📥 Master Directory Bulk Import Engine</h2>',
         '                    <select id="admin-import-zone"><option value="">-- Select Target Zone --</option></select>',
-        '                    <input type="file" id="admin-file-import" accept=".json, .xlsx, .xls">',
+        '                    <input type="file" id="admin-file-import" accept=".json, .xlsx, .xls, .csv">',
         '                    <div class="flex">',
         '                        <button onclick="processImport(\'master\', \'merge\')" class="primary-btn">Import Master (Merge)</button>',
         '                        <button onclick="processImport(\'master\', \'reset\')" class="primary-btn danger">Import Master (Reset & Add)</button>',
@@ -508,7 +554,7 @@ app.get('/', (req, res) => {
         '                        </div>',
         '                        <button class="primary-btn success" style="height: 42px; font-size:15px" id="recordBtn" onclick="dispenseDrug()">RECORD ENTRY</button>',
 
-        '                        <h2 style="margin-top:25px">📊 Cumulative Totals (Auto-Aggregated via SQL)</h2>',
+        '                        <h2 style="margin-top:25px">📊 Cumulative Totals (Auto-Aggregated via Turso)</h2>',
         '                        <input type="text" onkeyup="filterTable(\'dailyBody\', this.value)" placeholder="Filter cumulative totals...">',
         '                        <div class="table-wrap" style="max-height: 380px;">',
         '                            <table><thead><tr><th>Drug Name</th><th>Total Qty</th><th style="text-align:right">Action</th></tr></thead><tbody id="dailyBody"></tbody></table>',
@@ -521,7 +567,7 @@ app.get('/', (req, res) => {
         '                        <div class="table-wrap" style="max-height: 250px; margin-bottom: 25px;"><table><tbody id="historyBody"></tbody></table></div>',
 
         '                        <h2>📥 Import Today\'s Total Backup Data</h2>',
-        '                        <input type="file" id="user-file-import" accept=".json, .xlsx, .xls">',
+        '                        <input type="file" id="user-file-import" accept=".json, .xlsx, .xls, .csv">',
         '                        <div class="flex">',
         '                            <button onclick="processUserImport(\'merge\')" class="primary-btn">Merge & Add</button>',
         '                            <button onclick="processUserImport(\'reset\')" class="primary-btn warning">Reset & Add</button>',
@@ -571,7 +617,7 @@ app.get('/', (req, res) => {
         '        let assignedUserZones = [];',
         '        let masterDrugsList = [];',
         '        let dispenseHistory = [];',
-        '        let dailyLog = {};', // Now explicitly mapped from SQL aggregate sums',
+        '        let dailyLog = {};',
         '        let availableZonesList = [];',
         '        let autoSyncTimer = null;',
 
@@ -584,7 +630,7 @@ app.get('/', (req, res) => {
         '        window.addEventListener("beforeunload", function (e) {',
         '            if (currentUser && currentUser.role !== "ADMIN" && Object.keys(dailyLog).length > 0) {',
         '                e.preventDefault();',
-        '                e.returnValue = "Have you downloaded your JSON and PDF backups? Your data remains saved, but make sure you have local copies!";',
+        '                e.returnValue = "Have you downloaded your JSON and PDF backups? Your data remains saved securely in the cloud, but make sure you have local copies!";',
         '                return e.returnValue;',
         '            }',
         '        });',
@@ -613,7 +659,7 @@ app.get('/', (req, res) => {
 
         '        function handleLogout(force = false) {',
         '            if (!force && currentUser && currentUser.role !== "ADMIN" && Object.keys(dailyLog).length > 0) {',
-        '                if (!confirm("Are you sure you want to log out?\\n\\nHave you downloaded your PDF and JSON backup? (Your data is safely stored in the database and will be here when you log back in.)")) return;',
+        '                if (!confirm("Are you sure you want to log out?\\n\\nHave you downloaded your PDF and JSON backup? (Your data is safely stored in the cloud database and will be here when you log back in.)")) return;',
         '            }',
         '            if (autoSyncTimer) clearInterval(autoSyncTimer);',
         '            if(token) fetch("/api/logout", { method: "POST", headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ zone: activeZone }) }).catch(()=>{});',
@@ -680,9 +726,9 @@ app.get('/', (req, res) => {
         '                const zonesStr = u.zones.join(",");',
         '                tbody.innerHTML += `<tr><td>${u.username}</td><td>${u.phone}</td><td>${u.zones.join(", ")}</td><td>${u.status ? "ACTIVE" : "DISABLED"}</td>',
         '                    <td>',
-        '                        <button onclick="openEditModal(${u.id}, \'${u.username}\', \'${zonesStr}\')" class="action-link" style="color:var(--accent); font-size:13px; text-decoration:none; border:1px solid var(--accent); border-radius:4px; padding:4px 8px;">Edit Zones</button>',
-        '                        <button onclick="toggleUser(${u.id}, ${u.status ? 0 : 1})" class="action-link" style="color:var(--warning);">${u.status ? "Disable" : "Enable"}</button>',
-        '                        <button onclick="removeUser(${u.id})" class="action-link" style="color:var(--danger);">Remove</button>',
+        '                        <button onclick="openEditModal(\'${u.id}\', \'${u.username}\', \'${zonesStr}\')" class="action-link" style="color:var(--accent); font-size:13px; text-decoration:none; border:1px solid var(--accent); border-radius:4px; padding:4px 8px;">Edit Zones</button>',
+        '                        <button onclick="toggleUser(\'${u.id}\', ${u.status ? 0 : 1})" class="action-link" style="color:var(--warning);">${u.status ? "Disable" : "Enable"}</button>',
+        '                        <button onclick="removeUser(\'${u.id}\')" class="action-link" style="color:var(--danger);">Remove</button>',
         '                    </td></tr>`;',
         '            });',
 
@@ -742,7 +788,6 @@ app.get('/', (req, res) => {
         '                const masterData = await mRes.json();',
         '                const masterStr = JSON.stringify(masterData);',
 
-        '                // Fetch aggregated totals directly from DB grouping, fixing the 1000 limit bug completely',
         '                const hRes = await fetch(`/api/dispense/sync?zone=${activeZone}`, { headers: { "Authorization": "Bearer " + token } });',
         '                const syncData = await hRes.json();',
         '                const historyStr = JSON.stringify(syncData.history);',
@@ -770,7 +815,7 @@ app.get('/', (req, res) => {
         '            }',
         '            if (historyChanged) {',
         '                renderTable("dailyBody", Object.keys(dailyLog).sort(), (k) => `<td>${k}</td><td><span class="badge">${dailyLog[k]}</span></td><td style="text-align:right"><button class="action-link" style="color:var(--warning)" onclick="editCumulativeQty(\'${k}\', ${dailyLog[k]})">Edit</button></td>`);',
-        '                renderTable("historyBody", dispenseHistory, (i) => `<td><span style="color:gray; font-size:10px">${i.timestamp}</span><br>${i.drug_name} (<b>${i.qty}</b>) - <i style="font-size:11px">${i.entered_by}</i></td><td style="text-align:right"><button class="action-link" style="color:var(--warning)" onclick="editHistoryQty(${i.id}, ${i.qty})">Edit</button><button class="action-link" style="color:var(--danger)" onclick="undoTransaction(${i.id})">Undo</button></td>`);',
+        '                renderTable("historyBody", dispenseHistory, (i) => `<td><span style="color:gray; font-size:10px">${i.timestamp}</span><br>${i.drug_name} (<b>${i.qty}</b>) - <i style="font-size:11px">${i.entered_by}</i></td><td style="text-align:right"><button class="action-link" style="color:var(--warning)" onclick="editHistoryQty(\'${i.id}\', ${i.qty})">Edit</button><button class="action-link" style="color:var(--danger)" onclick="undoTransaction(\'${i.id}\')">Undo</button></td>`);',
         '            }',
         '        }',
 
@@ -815,7 +860,6 @@ app.get('/', (req, res) => {
         '            const remarks = document.getElementById("pdfRemarks").value.trim();',
         '            if (!remarks) return alert("Remarks field is mandatory for downloading PDF reporting.");',
         '            ',
-        '            // Generate JSON Backup Blob',
         '            const jsonStr = JSON.stringify(dailyLog, null, 2);',
         '            const blob = new Blob([jsonStr], { type: "application/json" });',
         '            const url = URL.createObjectURL(blob);',
@@ -823,7 +867,6 @@ app.get('/', (req, res) => {
         '            a.href = url; a.download = `RxMediBackup_${activeZone}_${Date.now()}.json`;',
         '            document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);',
         '            ',
-        '            // Generate PDF Report',
         '            const { jsPDF } = window.jspdf; const doc = new jsPDF();',
         '            doc.setFontSize(16); doc.text(`RXMEDISYNC DAILY REPORT - ${activeZone}`, 14, 20);',
         '            doc.setFontSize(10); doc.text(`Date: ${new Date().toLocaleString()} | Remarks: ${remarks}`, 14, 28);',
@@ -832,35 +875,96 @@ app.get('/', (req, res) => {
         '            doc.save(`RxMediReport_${activeZone}_${Date.now()}.pdf`);',
         '        }',
 
-        '        // User Data Import Functions',
+        '        function processImport(type, mode) {',
+        '            const targetZone = document.getElementById("admin-import-zone").value;',
+        '            const fileInput = document.getElementById("admin-file-import");',
+        '            if (!targetZone) return alert("Select a target zone for import.");',
+        '            if (!fileInput.files.length) return alert("Choose a file.");',
+        '            ',
+        '            const file = fileInput.files[0]; ',
+        '            const fileName = file.name.toLowerCase(); ',
+        '            const reader = new FileReader();',
+        '            ',
+        '            document.body.style.cursor = "wait";',
+        '            ',
+        '            if (fileName.endsWith(".json")) {',
+        '                reader.onload = async (e) => {',
+        '                    try {',
+        '                        let parsedData = JSON.parse(e.target.result);',
+        '                        const normalizedArr = normalizeImportData(parsedData);',
+        '                        await sendImportPayload(type, mode, targetZone, normalizedArr);',
+        '                    } catch(err) { alert("Invalid JSON file format."); }',
+        '                    document.body.style.cursor = "default";',
+        '                };',
+        '                reader.readAsText(file);',
+        '            } else if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls") || fileName.endsWith(".csv")) {',
+        '                reader.onload = async (e) => {',
+        '                    try {',
+        '                        const data = new Uint8Array(e.target.result);',
+        '                        const workbook = XLSX.read(data, { type: "array" });',
+        '                        const sheet = workbook.Sheets[workbook.SheetNames[0]];',
+        '                        const parsedRows = XLSX.utils.sheet_to_json(sheet);',
+        '                        await sendImportPayload(type, mode, targetZone, parsedRows);',
+        '                    } catch(err) { alert("Failed to read Excel/CSV file."); }',
+        '                    document.body.style.cursor = "default";',
+        '                };',
+        '                reader.readAsArrayBuffer(file);',
+        '            } else {',
+        '                alert("Unsupported file format. Please upload .json, .xlsx, .xls, or .csv");',
+        '                document.body.style.cursor = "default";',
+        '            }',
+        '        }',
+
+        '        async function sendImportPayload(type, mode, zone, items) {',
+        '            try {',
+        '                const res = await fetch("/api/master-drugs/import", { method: "POST", headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ zone, mode, drugs: items }) });',
+        '                if (await handleAccessError(res)) return;',
+        '                const data = await res.json();',
+        '                if (res.ok) alert(data.message || "Import success!"); else alert("Import error: " + data.error);',
+        '            } catch (e) { alert("Network error during import."); }',
+        '        }',
+
         '        function processUserImport(mode) {',
         '            const fileInput = document.getElementById("user-file-import");',
         '            if (!fileInput.files.length) return alert("Choose a file to import.");',
         '            const file = fileInput.files[0]; const fileName = file.name.toLowerCase();',
         '            const reader = new FileReader();',
+        '            ',
+        '            document.body.style.cursor = "wait";',
+        '            ',
         '            if (fileName.endsWith(".json")) {',
         '                reader.onload = async (e) => {',
         '                    try {',
         '                        const parsed = JSON.parse(e.target.result);',
         '                        const arr = Array.isArray(parsed) ? parsed : Object.keys(parsed).map(k => ({ drug_name: k, qty: parsed[k] }));',
-        '                        sendUserImport(mode, arr);',
+        '                        await sendUserImport(mode, arr);',
         '                    } catch(err) { alert("Invalid JSON file format."); }',
+        '                    document.body.style.cursor = "default";',
         '                };',
         '                reader.readAsText(file);',
-        '            } else if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {',
+        '            } else if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls") || fileName.endsWith(".csv")) {',
         '                reader.onload = async (e) => {',
-        '                    const data = new Uint8Array(e.target.result); const workbook = XLSX.read(data, { type: "array" });',
-        '                    const sheet = workbook.Sheets[workbook.SheetNames[0]];',
-        '                    sendUserImport(mode, XLSX.utils.sheet_to_json(sheet));',
+        '                    try {',
+        '                        const data = new Uint8Array(e.target.result); const workbook = XLSX.read(data, { type: "array" });',
+        '                        const sheet = workbook.Sheets[workbook.SheetNames[0]];',
+        '                        await sendUserImport(mode, XLSX.utils.sheet_to_json(sheet));',
+        '                    } catch(err) { alert("Failed to read Excel/CSV file."); }',
+        '                    document.body.style.cursor = "default";',
         '                };',
         '                reader.readAsArrayBuffer(file);',
+        '            } else {',
+        '                alert("Unsupported format. Use JSON, XLSX, or CSV.");',
+        '                document.body.style.cursor = "default";',
         '            }',
         '        }',
+
         '        async function sendUserImport(mode, items) {',
         '            if(!confirm(`Proceed with import? Mode: ${mode.toUpperCase()} AND ADD`)) return;',
-        '            const res = await fetch("/api/dispense/import", { method: "POST", headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ zone: activeZone, mode, items }) });',
-        '            const data = await res.json();',
-        '            if (res.ok) { alert(data.message); syncUserData(); } else alert("Import error: " + data.error);',
+        '            try {',
+        '                const res = await fetch("/api/dispense/import", { method: "POST", headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ zone: activeZone, mode, items }) });',
+        '                const data = await res.json();',
+        '                if (res.ok) { alert(data.message); syncUserData(); } else alert("Import error: " + data.error);',
+        '            } catch (e) { alert("Network error during import."); }',
         '        }',
 
         '        function openEditModal(id, username, currentZonesStr) {',
@@ -904,14 +1008,6 @@ app.get('/', (req, res) => {
         '            return Array.isArray(items) ? items : [items];',
         '        }',
 
-        '        async function processImport(type, mode) {',
-        '            const targetZone = document.getElementById("admin-import-zone").value; const fileInput = document.getElementById("admin-file-import");',
-        '            if (!targetZone) return alert("Select a target zone."); if (!fileInput.files.length) return alert("Choose a file.");',
-        '            const file = fileInput.files[0]; const fileName = file.name.toLowerCase(); const reader = new FileReader();',
-        '            if (fileName.endsWith(".json")) { reader.onload = async (e) => { try { sendImportPayload(type, mode, targetZone, normalizeImportData(JSON.parse(e.target.result))); } catch(err) { alert("Invalid JSON."); } }; reader.readAsText(file); }',
-        '            else if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) { reader.onload = async (e) => { const workbook = XLSX.read(new Uint8Array(e.target.result), { type: "array" }); sendImportPayload(type, mode, targetZone, XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]])); }; reader.readAsArrayBuffer(file); }',
-        '        }',
-        '        async function sendImportPayload(type, mode, zone, items) { const res = await fetch("/api/master-drugs/import", { method: "POST", headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ zone, mode, drugs: items }) }); if (await handleAccessError(res)) return; if (res.ok) alert((await res.json()).message || "Import success!"); else alert("Import error."); }',
         '        async function updateAdminProfile() { const u = document.getElementById("admin-new-user").value; const p = document.getElementById("admin-new-pass").value; const res = await fetch("/api/admin/profile", { method: "PUT", headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ newUsername: u, newPassword: p }) }); if (await handleAccessError(res)) return; if (res.ok) { alert("Credentials updated. Logging out..."); handleLogout(true); } }',
         '        function filterTable(id, val) { const rows = document.getElementById(id).rows; const s = val.toUpperCase(); for (let r of rows) r.style.display = r.innerText.toUpperCase().includes(s) ? "" : "none"; }',
         '    </script>',
